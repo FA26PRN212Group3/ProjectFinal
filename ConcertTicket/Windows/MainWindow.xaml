@@ -1,0 +1,37 @@
+<Window x:Class="ConcertTicket.Windows.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Concert Ticket" Height="600" Width="960"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header: tên user + đăng xuất -->
+        <DockPanel Grid.Row="0">
+            <Button x:Name="LogoutButton" DockPanel.Dock="Right" Content="Đăng xuất" Width="100" Height="32"
+                    Click="LogoutButton_Click"/>
+            <TextBlock x:Name="WelcomeTextBlock" FontSize="18" FontWeight="Bold" VerticalAlignment="Center"/>
+        </DockPanel>
+
+        <!-- TODO (Bảo): ô tìm kiếm, ComboBox địa điểm, DatePicker, nút Tìm -->
+        <TextBlock Grid.Row="1" Text="Danh sách concert" FontSize="16" Margin="0,16,0,8"/>
+
+        <DataGrid x:Name="ConcertDataGrid" Grid.Row="2" AutoGenerateColumns="False" IsReadOnly="True"
+                  SelectionMode="Single" MouseDoubleClick="ConcertDataGrid_MouseDoubleClick">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Tên concert" Width="*" Binding="{Binding Name}"/>
+                <DataGridTextColumn Header="Nghệ sĩ" Width="180" Binding="{Binding Artist}"/>
+                <DataGridTextColumn Header="Địa điểm" Width="200" Binding="{Binding Venue}"/>
+                <DataGridTextColumn Header="Ngày giờ" Width="140" Binding="{Binding StartTime, StringFormat=dd/MM/yyyy HH:mm}"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <Button x:Name="DetailButton" Grid.Row="3" Content="Xem chi tiết" Width="140" Height="36"
+                HorizontalAlignment="Right" Margin="0,12,0,0" Click="DetailButton_Click"/>
+    </Grid>
+</Window>
