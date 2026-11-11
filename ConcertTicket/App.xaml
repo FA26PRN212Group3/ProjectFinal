@@ -1,0 +1,9 @@
+﻿<Application x:Class="ConcertTicket.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:ConcertTicket">
+    <!-- KHÔNG có StartupUri: App.xaml.cs tự dựng DI rồi mở LoginWindow -->
+    <Application.Resources>
+
+    </Application.Resources>
+</Application>

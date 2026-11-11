@@ -1,0 +1,25 @@
+<Window x:Class="ConcertTicket.Windows.TicketWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Vé của bạn" Height="560" Width="720"
+        WindowStartupLocation="CenterOwner">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="StatusTextBlock" Grid.Row="0" FontSize="18" FontWeight="Bold"
+                   Text="Đang phát hành vé..." TextWrapping="Wrap"/>
+
+        <!-- TODO (Bảo): danh sách vé (mã vé, khu, gate, ảnh QR) -->
+        <ListBox x:Name="TicketListBox" Grid.Row="1" Margin="0,12,0,12"/>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+            <TextBlock x:Name="CalendarStatusTextBlock" VerticalAlignment="Center" Margin="0,0,16,0"/>
+            <Button x:Name="OpenCalendarButton" Content="Mở Google Calendar" Width="170" Height="36"
+                    IsEnabled="False" Click="OpenCalendarButton_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
