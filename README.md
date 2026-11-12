@@ -5,23 +5,21 @@ App WPF đặt vé concert: đăng nhập Google, chọn vé theo khu, thanh to�
 ## Chạy lần đầu
 
 1. **Database:** mở `Database/ConcertTicketDB.sql` trong SSMS và chạy (chạy lại sẽ xóa và tạo mới database).
-2. **Chuỗi kết nối:** mặc định dùng Windows Authentication (`Trusted_Connection=True`). Máy nào dùng `sa` thì set lại bằng user-secrets (bước 3).
-3. **Key bí mật** (chạy trong thư mục `ConcertTicket/`, không sửa `appsettings.json`):
+2. **Chuỗi kết nối:** mặc định dùng Windows Authentication (`Trusted_Connection=True`). Máy nào dùng `sa` thì ghi đè trong `appsettings.Development.json` (bước 3).
+3. **Key bí mật:** tạo file `ConcertTicket/appsettings.Development.json` (file này đã nằm trong `.gitignore`, KHÔNG push; xin key qua tin nhắn riêng). Không sửa `appsettings.json`. App tự đọc file này khi chạy Debug, giá trị trong đây đè lên `appsettings.json`:
 
-   ```
-   dotnet user-secrets set "Google:ClientId" "..."
-   dotnet user-secrets set "Google:ClientSecret" "..."
-   dotnet user-secrets set "VnPay:TmnCode" "..."
-   dotnet user-secrets set "VnPay:HashSecret" "..."
-   dotnet user-secrets set "Cloudinary:CloudName" "..."
-   dotnet user-secrets set "Cloudinary:ApiKey" "..."
-   dotnet user-secrets set "Cloudinary:ApiSecret" "..."
+   ```json
+   {
+     "Google": { "ClientId": "...", "ClientSecret": "..." },
+     "VnPay": { "TmnCode": "...", "HashSecret": "..." },
+     "Cloudinary": { "CloudName": "...", "ApiKey": "...", "ApiSecret": "..." }
+   }
    ```
 
-   Máy dùng `sa`:
+   Máy dùng `sa` thì thêm vào cùng file:
 
-   ```
-   dotnet user-secrets set "ConnectionStrings:ConcertDb" "Server=(local);uid=sa;pwd=...;database=ConcertTicketDB;TrustServerCertificate=True"
+   ```json
+   "ConnectionStrings": { "ConcertDb": "Server=(local);uid=sa;pwd=...;database=ConcertTicketDB;TrustServerCertificate=True" }
    ```
 
 4. Mở `ConcertTicket.slnx` bằng Visual Studio, bấm Run, bấm **"Đăng nhập bằng Google"**. Email Google phải nằm trong danh sách Test users của OAuth app (nhờ Huy thêm), nếu không Google báo `403: access_denied`.
