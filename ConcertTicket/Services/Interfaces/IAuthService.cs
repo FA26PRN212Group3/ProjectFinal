@@ -2,7 +2,6 @@ using ConcertTicket.Models;
 
 namespace ConcertTicket.Services.Interfaces;
 
-//Người viết: Huy
 public interface IAuthService
 {
     //mở trình duyệt cho user chọn tài khoản Google (scope: openid, email, profile, calendar.events)
