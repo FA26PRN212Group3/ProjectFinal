@@ -1,3 +1,4 @@
+using System.Data;
 using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
@@ -7,6 +8,7 @@ using ConcertTicket.Models;
 using ConcertTicket.Options;
 using ConcertTicket.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -52,7 +54,8 @@ public class VnPayService : IPaymentService
         Order? saved = await ReadOrderAsync(order.Id, cancellationToken).ConfigureAwait(false);
         if (saved == null || saved.Status != "Pending" || saved.Payment != null)
             throw new InvalidOperationException("Đơn không còn khả dụng để khởi tạo thanh toán.");
-        ValidateOrder(saved);
+        if (!IsValidOrder(saved))
+            throw new InvalidOperationException("Thông tin hoặc số tiền của đơn không hợp lệ cho VNPAY.");
 
         lock (_attemptLock)
         {
@@ -96,30 +99,20 @@ public class VnPayService : IPaymentService
     public async Task<PaymentResult> ProcessReturnUrlAsync(string url, CancellationToken cancellationToken = default)
     {
         VnPayOptions options = GetValidatedOptions();
-        if (!IsReturnUrl(url) || !TryReadReturnParameters(url, out var data)
-            || !HasValidSignature(data, options.HashSecret)) return InvalidReturn();
-
-        if (!data.TryGetValue("vnp_TmnCode", out string? terminal) || terminal != options.TmnCode
-            || !data.TryGetValue("vnp_TxnRef", out string? reference)) return InvalidReturn();
-        Match match = Regex.Match(reference, @"^CT([1-9][0-9]*)T([1-9][0-9]*)$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
-        if (!match.Success || !int.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int orderId))
-            return InvalidReturn();
+        if (!IsReturnUrl(url) || url.Length > 16_384) return InvalidReturn();
+        var error = ReadNotification(new Uri(url).Query, options, out var data, out int orderId);
+        if (error != null) return InvalidReturn();
 
         Order? order = await ReadOrderAsync(orderId, cancellationToken).ConfigureAwait(false);
         if (order == null || !IsValidOrder(order)
-            || reference != GetTransactionReference(order)
-            || !data.TryGetValue("vnp_Amount", out string? amount) || amount != FormatPaymentAmount(order)
-            || !data.TryGetValue("vnp_OrderInfo", out string? info) || info != CreateOrderInformation(order.Id)
-            || !TryNumeric(data, "vnp_ResponseCode", 2, 2, out string response)
-            || !TryNumeric(data, "vnp_TransactionStatus", 2, 2, out string transactionStatus)
-            || !TryNumeric(data, "vnp_TransactionNo", 1, 15, out string transactionNo)
-            || (data.TryGetValue("vnp_CurrCode", out string? currency) && currency != "VND")) return InvalidReturn();
-
-        bool reportedSuccess = response == "00" && transactionStatus == "00";
-        if (reportedSuccess && (transactionNo.All(c => c == '0')
-            || !data.TryGetValue("vnp_PayDate", out string? paid)
-            || !DateTime.TryParseExact(paid, "yyyyMMddHHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None, out _)))
+            || data["vnp_TxnRef"] != GetTransactionReference(order)
+            || data["vnp_Amount"] != FormatPaymentAmount(order)
+            || data.GetValueOrDefault("vnp_OrderInfo") != CreateOrderInformation(order.Id))
             return InvalidReturn();
+
+        string response = data["vnp_ResponseCode"];
+        string transactionNo = data["vnp_TransactionNo"];
+        bool reportedSuccess = IsSuccessfulPayment(data);
 
         PaymentResult databaseResult = DatabaseResult(order);
         if (databaseResult.IsSuccess && (!reportedSuccess || order.Payment!.TransactionNo != transactionNo)) return InvalidReturn();
@@ -128,7 +121,7 @@ public class VnPayService : IPaymentService
         {
             if (!_attempts.TryGetValue(order.Id, out PaymentAttempt? attempt))
             {
-                attempt = new PaymentAttempt(null, order.TotalAmount, reference, DateTimeOffset.MinValue);
+                attempt = new PaymentAttempt(null, order.TotalAmount, data["vnp_TxnRef"], DateTimeOffset.MinValue);
                 _attempts.Add(order.Id, attempt);
             }
             string fingerprint = data["vnp_SecureHash"].ToUpperInvariant();
@@ -185,6 +178,218 @@ public class VnPayService : IPaymentService
         string createdAtTicks = order.CreatedAt.Ticks.ToString(CultureInfo.InvariantCulture);
         return "CT" + orderId + "T" + createdAtTicks;
     }
+
+    public async Task<VnPayIpnResponse> ProcessIpnAsync(string queryString, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            VnPayOptions options = GetValidatedOptions();
+
+            var error = ReadNotification(queryString, options, out var parameters, out int orderId);
+            if (error != null) return error;
+            if (!IsFinalIpnStatus(parameters))
+                return IpnResponse("99", "Invalid or unresolved transaction status");
+
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    return await ConfirmIpnAsync(orderId, parameters, options.TmnCode, cancellationToken).ConfigureAwait(false);
+                }
+                catch (SqlException exception) when (exception.Number == 1205 && attempt < 2)
+                {
+                    await Task.Delay(50 * (attempt + 1), cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError("VNPAY IPN processing failed with {ErrorType}.", exception.GetType().Name);
+        }
+
+        return IpnResponse("99", "Unable to confirm transaction");
+    }
+
+    private async Task<VnPayIpnResponse> ConfirmIpnAsync(int orderId, Dictionary<string, string> parameters,
+        string terminalCode, CancellationToken cancellationToken)
+    {
+        await using var ctx = await _dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        ctx.Database.SetCommandTimeout(10);
+        await using var transaction = await ctx.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false);
+
+        string transactionNumber = parameters["vnp_TransactionNo"];
+        if (transactionNumber.Any(character => character != '0'))
+        {
+            string lockName = "ConcertTicket.VnPay." + terminalCode + "." + transactionNumber;
+            await ctx.Database.ExecuteSqlInterpolatedAsync($@"
+                DECLARE @LockResult int;
+                EXEC @LockResult = sys.sp_getapplock @Resource={lockName},
+                    @LockMode='Exclusive', @LockOwner='Transaction', @LockTimeout=5000;
+                IF @LockResult < 0 THROW 51001, 'Payment transaction lock unavailable.', 1;",
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        Order? order = await ctx.Orders.FromSqlInterpolated(
+                $"SELECT * FROM dbo.[Order] WITH (UPDLOCK, HOLDLOCK) WHERE Id={orderId}")
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (order == null || order.CreatedAt == default || parameters["vnp_TxnRef"] != GetTransactionReference(order))
+        {
+            return IpnResponse("01", "Order not found");
+        }
+
+        if (parameters.GetValueOrDefault("vnp_Amount") != FormatPaymentAmount(order))
+        {
+            return IpnResponse("04", "Invalid amount");
+        }
+
+        if (!IsValidOrder(order) || parameters.GetValueOrDefault("vnp_OrderInfo") != CreateOrderInformation(order.Id))
+        {
+            return IpnResponse("99", "Invalid order information");
+        }
+
+        Payment? existingPayment = await ctx.Payments.SingleOrDefaultAsync(p => p.OrderId == order.Id, cancellationToken).ConfigureAwait(false);
+        if (existingPayment != null)
+        {
+            return IsSameProcessedIpn(order, existingPayment, parameters)
+                ? IpnResponse("02", "Order already confirmed")
+                : IpnResponse("99", "Conflicting payment requires reconciliation");
+        }
+
+        if (order.Status != "Pending" || order.PaidAt != null)
+        {
+            return IpnResponse("99", "Invalid order state");
+        }
+
+        if (transactionNumber.Any(character => character != '0'))
+        {
+            bool usedByAnotherOrder = await ctx.Payments.AsNoTracking().AnyAsync(
+                p => p.Provider == "VNPay" && p.TransactionNo == transactionNumber && p.OrderId != orderId,
+                cancellationToken).ConfigureAwait(false);
+            if (usedByAnotherOrder)
+            {
+                return IpnResponse("99", "Transaction already belongs to another order");
+            }
+        }
+
+        bool isSuccessful = parameters["vnp_ResponseCode"] == "00";
+        if (isSuccessful)
+        {
+            int updatedZones = await ctx.Database.ExecuteSqlInterpolatedAsync($@"
+                UPDATE dbo.Zone SET SoldQuantity=SoldQuantity+{order.Quantity}
+                WHERE Id={order.ZoneId} AND SoldQuantity<=TotalQuantity-{order.Quantity};",
+                cancellationToken).ConfigureAwait(false);
+
+            if (updatedZones == 1)
+            {
+                order.Status = "Paid";
+                order.PaidAt = DateTime.ParseExact(parameters["vnp_PayDate"], "yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+            }
+            else
+            {
+                _logger.LogWarning("VNPAY order {OrderId} requires inventory reconciliation.", order.Id);
+            }
+        }
+        else
+        {
+            order.Status = "Failed";
+        }
+
+        ctx.Payments.Add(new Payment
+        {
+            OrderId = order.Id,
+            Provider = "VNPay",
+            Amount = order.TotalAmount,
+            TransactionNo = transactionNumber,
+            BankCode = parameters.GetValueOrDefault("vnp_BankCode"),
+            ResponseCode = parameters["vnp_ResponseCode"]
+        });
+
+        await ctx.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return IpnResponse("00", "Confirm Success");
+    }
+
+    private static VnPayIpnResponse? ReadNotification(string queryString, VnPayOptions options,
+        out Dictionary<string, string> parameters, out int orderId)
+    {
+        orderId = 0;
+        if (!TryReadPaymentQuery(queryString, out parameters))
+            return IpnResponse("99", "Invalid request");
+        if (!HasValidSignature(parameters, options.HashSecret))
+            return IpnResponse("97", "Invalid signature");
+        if (parameters.GetValueOrDefault("vnp_TmnCode") != options.TmnCode)
+            return IpnResponse("97", "Invalid merchant");
+        if (!TryReadOrderId(parameters.GetValueOrDefault("vnp_TxnRef", ""), out orderId))
+            return IpnResponse("01", "Order not found");
+        if (!HasValidTransactionFields(parameters))
+            return IpnResponse("99", "Invalid transaction fields");
+        return null;
+    }
+
+    private static bool HasValidTransactionFields(Dictionary<string, string> parameters)
+    {
+        if (!TryNumeric(parameters, "vnp_Amount", 1, 12, out _)
+            || !TryNumeric(parameters, "vnp_ResponseCode", 2, 2, out _)
+            || !TryNumeric(parameters, "vnp_TransactionStatus", 2, 2, out _)
+            || !TryNumeric(parameters, "vnp_TransactionNo", 1, 15, out string transactionNumber))
+            return false;
+        if (parameters.TryGetValue("vnp_CurrCode", out string? currency) && currency != "VND")
+            return false;
+        if (!IsSuccessfulPayment(parameters)) return true;
+        return transactionNumber.Any(character => character != '0')
+            && parameters.TryGetValue("vnp_PayDate", out string? paidAt)
+            && DateTime.TryParseExact(paidAt, "yyyyMMddHHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None, out _);
+    }
+
+    private static bool IsSuccessfulPayment(Dictionary<string, string> parameters) =>
+        parameters["vnp_ResponseCode"] == "00" && parameters["vnp_TransactionStatus"] == "00";
+
+    private static bool IsFinalIpnStatus(Dictionary<string, string> parameters)
+    {
+        if (parameters.TryGetValue("vnp_BankCode", out string? bankCode)
+            && (bankCode.Length > 20 || bankCode.Any(character => !char.IsAsciiLetterOrDigit(character))))
+            return false;
+        bool isDefinitiveFailure = parameters["vnp_ResponseCode"] != "00"
+            && parameters["vnp_ResponseCode"] != "07" && parameters["vnp_TransactionStatus"] == "02";
+        return IsSuccessfulPayment(parameters) || isDefinitiveFailure;
+    }
+
+    private static bool IsSameProcessedIpn(Order order, Payment payment, Dictionary<string, string> parameters)
+    {
+        bool matchesPayment = string.Equals(payment.Provider, "VNPay", StringComparison.OrdinalIgnoreCase)
+            && payment.Amount == order.TotalAmount
+            && payment.TransactionNo == parameters["vnp_TransactionNo"]
+            && payment.ResponseCode == parameters["vnp_ResponseCode"];
+
+        if (!matchesPayment)
+        {
+            return false;
+        }
+
+        if (payment.ResponseCode == "00")
+        {
+            return (order.Status == "Paid" && order.PaidAt != null)
+                || (order.Status == "Pending" && order.PaidAt == null);
+        }
+
+        return order.Status == "Failed" && order.PaidAt == null;
+    }
+
+    private static bool TryReadOrderId(string reference, out int orderId)
+    {
+        orderId = 0;
+        Match match = Regex.Match(reference, @"^CT([1-9][0-9]*)T([1-9][0-9]*)$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+        return match.Success && int.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out orderId);
+    }
+
+    private static VnPayIpnResponse IpnResponse(string responseCode, string message) =>
+        new VnPayIpnResponse { RspCode = responseCode, Message = message };
 
     private async Task<Order?> ReadOrderAsync(int orderId, CancellationToken cancellationToken)
     {
@@ -245,54 +450,23 @@ public class VnPayService : IPaymentService
 
     private static bool IsValidOrder(Order order)
     {
-        if (order.Id <= 0 || order.CreatedAt == default)
-        {
-            return false;
-        }
-
-        if (order.Quantity < 1 || order.Quantity > 4)
-        {
-            return false;
-        }
-
-        if (order.UnitPrice <= 0 || order.UnitPrice > 9_999_999_999m)
-        {
-            return false;
-        }
-
-        if (decimal.Truncate(order.UnitPrice) != order.UnitPrice)
-        {
-            return false;
-        }
-
-        decimal expectedTotal = order.UnitPrice * order.Quantity;
-        return order.TotalAmount == expectedTotal && order.TotalAmount <= 9_999_999_999m;
+        bool isSaved = order.Id > 0 && order.CreatedAt != default;
+        bool hasValidQuantity = order.Quantity >= 1 && order.Quantity <= 4;
+        bool hasValidPrice = order.UnitPrice > 0 && order.UnitPrice <= 9_999_999_999m
+            && decimal.Truncate(order.UnitPrice) == order.UnitPrice;
+        if (!isSaved || !hasValidQuantity || !hasValidPrice) return false;
+        return order.TotalAmount == order.UnitPrice * order.Quantity
+            && order.TotalAmount <= 9_999_999_999m;
     }
 
-    private static void ValidateOrder(Order order)
-    {
-        if (!IsValidOrder(order))
-        {
-            throw new InvalidOperationException("Thông tin hoặc số tiền của đơn không hợp lệ cho VNPAY.");
-        }
-    }
+    private static string FormatPaymentAmount(Order order) =>
+        (order.TotalAmount * 100).ToString("0", CultureInfo.InvariantCulture);
 
-    private static string FormatPaymentAmount(Order order)
-    {
-        decimal amount = order.TotalAmount * 100;
-        return amount.ToString("0", CultureInfo.InvariantCulture);
-    }
+    private static string FormatVietnamTimestamp(DateTimeOffset value) =>
+        value.ToOffset(TimeSpan.FromHours(7)).ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
 
-    private static string FormatVietnamTimestamp(DateTimeOffset value)
-    {
-        DateTimeOffset vietnamTime = value.ToOffset(TimeSpan.FromHours(7));
-        return vietnamTime.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-    }
-
-    private static string CreateOrderInformation(int orderId)
-    {
-        return "Thanh toan ve concert don hang " + orderId.ToString(CultureInfo.InvariantCulture);
-    }
+    private static string CreateOrderInformation(int orderId) =>
+        "Thanh toan ve concert don hang " + orderId.ToString(CultureInfo.InvariantCulture);
 
     private static string BuildQueryString(IEnumerable<KeyValuePair<string, string>> parameters)
     {
@@ -356,20 +530,9 @@ public class VnPayService : IPaymentService
     private static bool TryCreateHttpUri(string value, out Uri uri)
     {
         uri = null!;
-        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? parsedUri))
-        {
-            return false;
-        }
-
+        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? parsedUri)) return false;
         bool usesHttp = parsedUri.Scheme == Uri.UriSchemeHttp || parsedUri.Scheme == Uri.UriSchemeHttps;
-        bool hasUserInfo = parsedUri.UserInfo.Length > 0;
-        bool hasFragment = parsedUri.Fragment.Length > 0;
-
-        if (!usesHttp || hasUserInfo || hasFragment)
-        {
-            return false;
-        }
-
+        if (!usesHttp || parsedUri.UserInfo.Length > 0 || parsedUri.Fragment.Length > 0) return false;
         uri = parsedUri;
         return true;
     }
@@ -377,34 +540,24 @@ public class VnPayService : IPaymentService
     private static bool IsSameReturnEndpoint(string url, string configuredReturnUrl)
     {
         if (!TryCreateHttpUri(url, out Uri incomingUri)
-            || !TryCreateHttpUri(configuredReturnUrl, out Uri expectedUri))
-        {
+            || !TryCreateHttpUri(configuredReturnUrl, out Uri expectedUri) || expectedUri.Query.Length > 0)
             return false;
-        }
-
-        if (expectedUri.Query.Length > 0)
-        {
-            return false;
-        }
-
-        bool sameScheme = string.Equals(incomingUri.Scheme, expectedUri.Scheme, StringComparison.OrdinalIgnoreCase);
-        bool sameHost = string.Equals(incomingUri.IdnHost, expectedUri.IdnHost, StringComparison.OrdinalIgnoreCase);
-        bool samePort = incomingUri.Port == expectedUri.Port;
-        bool samePath = string.Equals(incomingUri.AbsolutePath, expectedUri.AbsolutePath, StringComparison.Ordinal);
-
-        return sameScheme && sameHost && samePort && samePath;
+        return string.Equals(incomingUri.Scheme, expectedUri.Scheme, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(incomingUri.IdnHost, expectedUri.IdnHost, StringComparison.OrdinalIgnoreCase)
+            && incomingUri.Port == expectedUri.Port
+            && string.Equals(incomingUri.AbsolutePath, expectedUri.AbsolutePath, StringComparison.Ordinal);
     }
 
-    private static bool TryReadReturnParameters(string url, out Dictionary<string, string> parameters)
+    private static bool TryReadPaymentQuery(string queryString, out Dictionary<string, string> parameters)
     {
         parameters = new Dictionary<string, string>(StringComparer.Ordinal);
-
-        if (url.Length > 16_384 || !TryCreateHttpUri(url, out Uri uri) || uri.Query.Length < 2)
+        if (string.IsNullOrEmpty(queryString) || queryString.Length > 16_384
+            || queryString[0] != '?' || queryString.Length < 2)
         {
             return false;
         }
 
-        string query = uri.Query.Substring(1);
+        string query = queryString.Substring(1);
         foreach (string pair in query.Split('&'))
         {
             int separatorIndex = pair.IndexOf('=');
@@ -434,24 +587,11 @@ public class VnPayService : IPaymentService
     {
         for (int index = 0; index < value.Length; index++)
         {
-            if (value[index] != '%')
-            {
-                continue;
-            }
-
-            if (index + 2 >= value.Length)
-            {
+            if (value[index] != '%') continue;
+            if (index + 2 >= value.Length || !Uri.IsHexDigit(value[index + 1]) || !Uri.IsHexDigit(value[index + 2]))
                 return false;
-            }
-
-            if (!Uri.IsHexDigit(value[index + 1]) || !Uri.IsHexDigit(value[index + 2]))
-            {
-                return false;
-            }
-
             index += 2;
         }
-
         return true;
     }
 
@@ -505,6 +645,13 @@ public class VnPayService : IPaymentService
 
         if (payment != null)
         {
+            if (payment.OrderId == order.Id && payment.Amount == order.TotalAmount
+                && string.Equals(payment.Provider, "VNPay", StringComparison.OrdinalIgnoreCase)
+                && payment.ResponseCode == "00")
+            {
+                return Result(order.Id, PaymentState.ReconciliationRequired,
+                    "Thanh toán đã được ghi nhận nhưng chưa thể cấp vé. Cần đối soát giao dịch; vui lòng không thanh toán lại.", payment);
+            }
             return Result(order.Id, PaymentState.AwaitingConfirmation, "Đang chờ hoàn tất xác nhận thanh toán trong hệ thống.");
         }
 

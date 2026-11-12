@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace ConcertTicket.Services.Interfaces;
 
 //kết quả IPaymentService.ProcessReturnUrl trả về
@@ -29,5 +31,15 @@ public enum PaymentState
     Confirmed,
     Declined,
     Cancelled,
-    Expired
+    Expired,
+    ReconciliationRequired
+}
+
+public class VnPayIpnResponse
+{
+    [JsonPropertyName("RspCode")]
+    public string RspCode { get; set; } = "99";
+
+    [JsonPropertyName("Message")]
+    public string Message { get; set; } = "Unknown error";
 }

@@ -20,4 +20,6 @@ public interface IPaymentService
 
     // Đọc xác nhận do backend/IPN lưu, không gọi QueryDR hoặc tự xác nhận.
     Task<PaymentResult> CheckPaymentStatusAsync(int orderId, CancellationToken cancellationToken = default);
+
+    Task<VnPayIpnResponse> ProcessIpnAsync(string queryString, CancellationToken cancellationToken = default);
 }
