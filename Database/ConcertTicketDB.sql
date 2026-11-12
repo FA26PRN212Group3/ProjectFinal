@@ -103,6 +103,46 @@ CREATE TABLE Ticket (
 );
 GO
 
+SET XACT_ABORT ON;
+BEGIN TRANSACTION;
+
+IF OBJECT_ID(N'dbo.PaymentCheckout', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.PaymentCheckout (
+        OrderId INT NOT NULL CONSTRAINT PK_PaymentCheckout PRIMARY KEY,
+        TxnRef NVARCHAR(100) NOT NULL,
+        TmnCode NVARCHAR(8) NOT NULL,
+        Amount DECIMAL(18,0) NOT NULL,
+        CreateDate NVARCHAR(14) NOT NULL,
+        ExpireDate NVARCHAR(14) NOT NULL,
+        ReturnUrl NVARCHAR(255) NOT NULL,
+        IpAddress NVARCHAR(45) NOT NULL,
+        NextQueryAt DATETIMEOFFSET NULL,
+        CONSTRAINT FK_PaymentCheckout_Order FOREIGN KEY (OrderId) REFERENCES dbo.[Order](Id),
+        CONSTRAINT UQ_PaymentCheckout_TxnRef UNIQUE (TxnRef)
+    );
+END;
+
+IF OBJECT_ID(N'dbo.PaymentActivity', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.PaymentActivity (
+        Id BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT PK_PaymentActivity PRIMARY KEY,
+        OrderId INT NULL,
+        OccurredAt DATETIMEOFFSET NOT NULL,
+        EventKey NVARCHAR(120) NOT NULL,
+        EventType NVARCHAR(50) NOT NULL,
+        Outcome NVARCHAR(10) NOT NULL,
+        Details NVARCHAR(300) NOT NULL,
+        CONSTRAINT FK_PaymentActivity_Order FOREIGN KEY (OrderId) REFERENCES dbo.[Order](Id),
+        CONSTRAINT UQ_PaymentActivity_EventKey UNIQUE (EventKey),
+        CONSTRAINT CK_PaymentActivity_Outcome CHECK (Outcome IN ('Pending','Success','Failed','Warning'))
+    );
+    CREATE INDEX IX_PaymentActivity_OrderTime ON dbo.PaymentActivity(OrderId, OccurredAt, Id);
+END;
+
+COMMIT TRANSACTION;
+GO
+
 -- ===== DỮ LIỆU MẪU =====
 INSERT INTO Concert (Name, Artist, Venue, Address, StartTime, EndTime, Description) VALUES
 (N'Đêm Nhạc Mùa Đông 2026', N'Nhiều nghệ sĩ', N'Nhà thi đấu Phú Thọ', N'1 Lữ Gia, Quận 11, TP.HCM',
