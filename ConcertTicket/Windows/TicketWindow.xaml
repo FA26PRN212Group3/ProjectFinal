@@ -14,12 +14,19 @@
                    Text="Đang phát hành vé..." TextWrapping="Wrap"/>
 
         <!-- TODO (Bảo): danh sách vé (mã vé, khu, gate, ảnh QR) -->
-        <ListBox x:Name="TicketListBox" Grid.Row="1" Margin="0,12,0,12"/>
+        <ListBox x:Name="TicketListBox" Grid.Row="1" Margin="0,12,0,12" DisplayMemberPath="TicketCode"/>
 
-        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-            <TextBlock x:Name="CalendarStatusTextBlock" VerticalAlignment="Center" Margin="0,0,16,0"/>
-            <Button x:Name="OpenCalendarButton" Content="Mở Google Calendar" Width="170" Height="36"
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="CalendarStatusTextBlock" VerticalAlignment="Center" Margin="0,0,16,0" TextWrapping="Wrap"/>
+            <Button x:Name="RetryCalendarButton" Grid.Column="1" Content="Thử lại Calendar" Width="130" Height="36"
+                    Margin="0,0,8,0" Visibility="Collapsed" IsEnabled="False" Click="RetryCalendarButton_Click"/>
+            <Button x:Name="OpenCalendarButton" Grid.Column="2" Content="Mở Google Calendar" Width="170" Height="36"
                     IsEnabled="False" Click="OpenCalendarButton_Click"/>
-        </StackPanel>
+        </Grid>
     </Grid>
 </Window>
