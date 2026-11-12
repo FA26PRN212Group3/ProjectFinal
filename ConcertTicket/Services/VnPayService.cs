@@ -132,6 +132,27 @@ public partial class VnPayService : IPaymentService
 
         lock (_attemptLock)
         {
+            if (_attempts.TryGetValue(orderId, out PaymentAttempt? seen) && seen.ReturnFingerprint != null
+                && seen.ReturnFingerprint != data["vnp_SecureHash"].ToUpperInvariant()) return InvalidReturn();
+        }
+        if (options.ConfirmFromSignedReturn && reportedSuccess && IsFinalIpnStatus(data))
+        {
+            await RecordActivityAsync(orderId, "HmacVerified", "Success", "return-verified:" + returnKey, cancellationToken).ConfigureAwait(false);
+            if (order.Status == "Pending" && order.Payment == null)
+            {
+                VnPayIpnResponse confirmation = await ConfirmWithRetryAsync(orderId, data, options.TmnCode, cancellationToken).ConfigureAwait(false);
+                if (confirmation.RspCode is not ("00" or "02"))
+                    return Result(orderId, PaymentState.AwaitingConfirmation, "Chưa thể ghi nhận signed return. Vui lòng kiểm tra lại trạng thái đơn.");
+                order = await ReadOrderAsync(orderId, cancellationToken).ConfigureAwait(false);
+                if (order == null) return InvalidReturn();
+                databaseResult = DatabaseResult(order);
+            }
+            else if (order.Payment != null && IsSameProcessedIpn(order, order.Payment, data))
+                await RecordActivityAsync(orderId, "DuplicateIpnIgnored", "Warning", "return-duplicate:" + returnKey, cancellationToken).ConfigureAwait(false);
+        }
+
+        lock (_attemptLock)
+        {
             if (!_attempts.TryGetValue(order.Id, out PaymentAttempt? attempt))
             {
                 attempt = new PaymentAttempt(null, order.TotalAmount, data["vnp_TxnRef"], DateTimeOffset.MinValue);
@@ -157,7 +178,7 @@ public partial class VnPayService : IPaymentService
                 attempt.ReturnResult.State = PaymentState.AwaitingConfirmation;
                 attempt.ReturnResult.Message = "Đang chờ xác nhận thanh toán trong hệ thống.";
             }
-            if (!duplicate) _logger.LogInformation("VNPAY return verified for order {OrderId}; payment state unchanged.", order.Id);
+            if (!duplicate) _logger.LogInformation("VNPAY return verified for order {OrderId}; state={State}.", order.Id, result.State);
             return result;
         }
     }
@@ -624,7 +645,7 @@ public partial class VnPayService : IPaymentService
         if (reportedSuccess)
         {
             return Result(orderId, PaymentState.AwaitingConfirmation,
-                "Đang chờ xác nhận thanh toán. ReturnUrl chưa phải xác nhận từ IPN.");
+                "Đã nhận kết quả từ VNPAY. Ứng dụng đang xác minh thanh toán.");
         }
 
         if (responseCode == "24")

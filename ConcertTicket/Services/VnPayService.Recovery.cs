@@ -91,7 +91,7 @@ public partial class VnPayService
         "ReturnUrlReceived" => "Đã nhận chuyển hướng trình duyệt; chưa dùng để xác nhận thanh toán.",
         "IpnReceived" => "Đã nhận thông báo từ cổng thanh toán.",
         "HmacVerified" => "Chữ ký thông báo hợp lệ.",
-        "HmacRejected" => "Thông báo không vượt qua kiểm tra xác thực.",
+        "HmacRejected" => "Chữ ký return/IPN không hợp lệ.",
         "DatabaseTransactionStarted" => "Bắt đầu kiểm tra thanh toán và tồn kho trong transaction.",
         "PaymentConfirmed" => "Thanh toán và tồn kho đã được xác nhận đồng thời.",
         "PaymentFailed" => "Cổng thanh toán xác nhận giao dịch lỗi.",
@@ -100,6 +100,7 @@ public partial class VnPayService
         "QueryDrRequested" => "Đã gửi yêu cầu truy vấn kết quả giao dịch.",
         "QueryDrUnresolved" => "Chưa có kết quả cuối đã xác thực; giữ trạng thái hiện tại.",
         "QueryDrHttpError" => "Không truy vấn được kết quả do phản hồi HTTP từ cổng thanh toán.",
+        "QueryDrResponseRejected" => "Phản hồi QueryDR chưa vượt qua kiểm tra chữ ký hoặc dữ liệu giao dịch.",
         "ReconciliationCompleted" => "Đã xử lý kết quả đối soát có chữ ký hợp lệ.",
         "ReconciliationRequired" => "Đã ghi nhận tiền nhưng không đủ tồn kho; cần xử lý thủ công, không thanh toán lại.",
         "TicketIssuanceReady" => "Đủ điều kiện chuyển đến chức năng phát hành vé.",
@@ -199,10 +200,14 @@ public partial class VnPayService
                         if (buffer.Length + count > 32_768) throw new InvalidDataException("Oversized QueryDR response");
                         await buffer.WriteAsync(chunk.AsMemory(0, count), timeout.Token).ConfigureAwait(false);
                     }
-                    Dictionary<string, string>? data = ValidateQueryResponse(buffer.ToArray(), checkout, options.HashSecret);
+                    byte[] responseBytes = buffer.ToArray();
+                    await RecordActivityAsync(orderId, "QueryDrResponseMetadata", "Pending", "query-metadata:" + correlation + ":" + attempt,
+                        deadline.Token, DescribeQueryResponse(responseBytes, checkout)).ConfigureAwait(false);
+                    Dictionary<string, string>? data = ReadVerifiedQueryResponse(responseBytes, checkout, options.HashSecret, out string rejection);
                     if (data == null)
                     {
-                        await RecordActivityAsync(orderId, "HmacRejected", "Warning", "query-rejected:" + correlation, deadline.Token).ConfigureAwait(false);
+                        failureMessage = "Chưa xác nhận thanh toán. " + rejection;
+                        await RecordActivityAsync(orderId, "QueryDrResponseRejected", "Warning", "query-rejected:" + correlation, deadline.Token, failureMessage).ConfigureAwait(false);
                         break;
                     }
                     await RecordActivityAsync(orderId, "HmacVerified", "Success", "query-verified:" + correlation, deadline.Token).ConfigureAwait(false);
@@ -236,7 +241,31 @@ public partial class VnPayService
     }
 
     private static Dictionary<string, string>? ValidateQueryResponse(byte[] json, PaymentCheckout checkout, string secret)
+        => ReadVerifiedQueryResponse(json, checkout, secret, out _);
+
+    private static string DescribeQueryResponse(byte[] json, PaymentCheckout checkout)
     {
+        try
+        {
+            if (json.AsSpan().StartsWith(new byte[] { 0xEF, 0xBB, 0xBF })) json = json[3..];
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            string Value(string key) => root.TryGetProperty(key, out var value) && value.ValueKind is JsonValueKind.String or JsonValueKind.Number ? value.ToString() : "";
+            string Code(string key) => Value(key) is { Length: 2 } code && code.All(char.IsAsciiDigit) ? code : "absent_or_invalid";
+            string Match(string key, string expected) => !root.TryGetProperty(key, out _) ? "unknown" : (Value(key) == expected ? "yes" : "no");
+            return "QD_RESPONSE_METADATA: HTTP=200; API=" + Code("vnp_ResponseCode") + "; status=" + Code("vnp_TransactionStatus")
+                + "; signature=" + (Value("vnp_SecureHash").Length > 0 ? "present" : "absent")
+                + "; merchantMatch=" + Match("vnp_TmnCode", checkout.TmnCode) + "; refMatch=" + Match("vnp_TxnRef", checkout.TxnRef)
+                + "; amountMatch=" + Match("vnp_Amount", (checkout.Amount * 100).ToString("0", CultureInfo.InvariantCulture));
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        { return "QD_JSON_INVALID: HTTP=200; response is not a JSON object with readable fields."; }
+    }
+
+    private static Dictionary<string, string>? ReadVerifiedQueryResponse(byte[] json, PaymentCheckout checkout, string secret, out string rejection)
+    {
+        rejection = "QD_JSON_INVALID: JSON QueryDR không hợp lệ hoặc có trường trùng lặp.";
+        if (json.AsSpan().StartsWith(new byte[] { 0xEF, 0xBB, 0xBF })) json = json[3..];
         using JsonDocument document = JsonDocument.Parse(json);
         if (document.RootElement.ValueKind != JsonValueKind.Object) return null;
         var data = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -246,21 +275,36 @@ public partial class VnPayService
             {
                 JsonValueKind.String => property.Value.GetString(),
                 JsonValueKind.Number => property.Value.GetRawText(),
+                JsonValueKind.Null => "",
                 _ => null
             };
             if (value == null || !data.TryAdd(property.Name, value)) return null;
         }
-        if (!data.TryGetValue("vnp_SecureHash", out string? signature) || signature.Length != 128 || !signature.All(Uri.IsHexDigit)) return null;
+        rejection = "QD_SIGNATURE_MISSING: Phản hồi thiếu chữ ký HMAC-SHA512 hợp lệ.";
+        if (!data.TryGetValue("vnp_SecureHash", out string? signature) || signature.Length != 128 || !signature.All(Uri.IsHexDigit))
+        {
+            if (TryNumeric(data, "vnp_ResponseCode", 2, 2, out string code) && code != "00")
+                rejection = code == "99"
+                    ? "QD_API_ERROR_UNSIGNED: VNPAY API trả 99 không chữ ký; kiểm tra quyền QueryDR/IP với VNPAY. Không dùng kết quả này để xác nhận đơn."
+                    : "QD_API_ERROR_UNSIGNED: API VNPAY trả mã " + code + "; chữ ký thiếu hoặc không hợp lệ; không dùng kết quả này để xác nhận đơn.";
+            return null;
+        }
         string expected = CreateSignature(string.Join("|", QueryResponseFields.Select(f => data.GetValueOrDefault(f, ""))), secret);
-        if (!CryptographicOperations.FixedTimeEquals(Convert.FromHexString(signature), Convert.FromHexString(expected))) return null;
+        bool matchesSignature = CryptographicOperations.FixedTimeEquals(Convert.FromHexString(signature), Convert.FromHexString(expected));
+        rejection = "QD_SIGNATURE_MISMATCH: Chữ ký QueryDR không khớp. Kiểm tra cấu hình merchant và chuỗi dữ liệu ký; không thanh toán lại.";
+        if (!matchesSignature) return null;
+        rejection = "QD_RESPONSE_ID_COMMAND: Chữ ký hợp lệ nhưng ResponseId hoặc Command của QueryDR không hợp lệ.";
         if (!data.TryGetValue("vnp_ResponseId", out string? responseId) || responseId.Length is < 1 or > 32
-            || !responseId.All(char.IsAsciiLetterOrDigit) || data.GetValueOrDefault("vnp_Command") != "querydr"
-            || data.GetValueOrDefault("vnp_TmnCode") != checkout.TmnCode || data.GetValueOrDefault("vnp_TxnRef") != checkout.TxnRef
-            || data.GetValueOrDefault("vnp_OrderInfo") != CreateOrderInformation(checkout.OrderId)
-            || data.GetValueOrDefault("vnp_Amount") != (checkout.Amount * 100).ToString("0", CultureInfo.InvariantCulture)
-            || data.GetValueOrDefault("vnp_TransactionType") != "01"
-            || !TryNumeric(data, "vnp_ResponseCode", 2, 2, out _)
+            || !responseId.All(char.IsAsciiLetterOrDigit) || data.GetValueOrDefault("vnp_Command") != "querydr") return null;
+        rejection = "QD_MERCHANT_REFERENCE: Chữ ký hợp lệ nhưng merchant hoặc mã tham chiếu không khớp checkout.";
+        if (data.GetValueOrDefault("vnp_TmnCode") != checkout.TmnCode || data.GetValueOrDefault("vnp_TxnRef") != checkout.TxnRef) return null;
+        rejection = "QD_AMOUNT_ORDERINFO: Chữ ký hợp lệ nhưng số tiền hoặc nội dung đơn không khớp checkout.";
+        if (data.GetValueOrDefault("vnp_OrderInfo") != CreateOrderInformation(checkout.OrderId)
+            || data.GetValueOrDefault("vnp_Amount") != (checkout.Amount * 100).ToString("0", CultureInfo.InvariantCulture)) return null;
+        rejection = "QD_TYPE_STATUS: Chữ ký hợp lệ nhưng loại giao dịch hoặc mã trạng thái không hợp lệ.";
+        if (data.GetValueOrDefault("vnp_TransactionType") != "01" || !TryNumeric(data, "vnp_ResponseCode", 2, 2, out _)
             || !TryNumeric(data, "vnp_TransactionStatus", 2, 2, out _)) return null;
+        rejection = "";
         return data;
     }
 

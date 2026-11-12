@@ -11,6 +11,7 @@ public class VnPayOptions
     public int PaymentTimeoutMinutes { get; set; } = 15;
 
     public int QueryTimeoutSeconds { get; set; } = 10;
+    public bool ConfirmFromSignedReturn { get; set; } = false;
 
     // Sandbox desktop không có HTTP request để lấy IP của trình duyệt.
     public string IpAddress { get; set; } = "127.0.0.1";
@@ -18,7 +19,7 @@ public class VnPayOptions
 
 public class VnPayIpnOptions
 {
-    public bool Enabled { get; set; } = true;
+    public bool Enabled { get; set; } = false;
     public int Port { get; set; } = 5088;
     public string Route { get; set; } = "/vnpay/ipn";
 }
