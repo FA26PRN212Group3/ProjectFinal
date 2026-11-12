@@ -4,8 +4,31 @@
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         Title="Thanh toán VNPay" Height="760" Width="1000"
         WindowStartupLocation="CenterOwner">
-    <Grid>
-        <!-- trang VNPay Sandbox hiện trong này -->
-        <wv2:WebView2 x:Name="PaymentWebView"/>
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel Grid.Row="0" Margin="0,0,0,10">
+            <TextBlock x:Name="OrderSummaryTextBlock" FontSize="18" FontWeight="Bold" TextWrapping="Wrap"/>
+            <TextBlock Text="Môi trường Sandbox — chỉ dùng để kiểm thử." Foreground="Gray" Margin="0,4,0,0"/>
+        </StackPanel>
+        <StackPanel Grid.Row="1" Margin="0,0,0,10">
+            <TextBlock x:Name="PaymentStatusTextBlock" Text="Đang chuẩn bị thanh toán..." TextWrapping="Wrap"
+                       AutomationProperties.LiveSetting="Polite"/>
+            <ProgressBar x:Name="LoadingProgressBar" IsIndeterminate="True" Height="4" Margin="0,8,0,0"/>
+        </StackPanel>
+        <wv2:WebView2 x:Name="PaymentWebView" Grid.Row="2" Visibility="Collapsed"/>
+        <WrapPanel Grid.Row="3" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button x:Name="ReloadButton" Content="Tải lại trang thanh toán" Padding="12,7" Margin="0,0,8,0"
+                    IsEnabled="False" Click="ReloadButton_Click"/>
+            <Button x:Name="CheckStatusButton" Content="Kiểm tra xác nhận" Padding="12,7" Margin="0,0,8,0"
+                    IsEnabled="False" Click="CheckStatusButton_Click"/>
+            <Button x:Name="ContinueButton" Content="Tiếp tục đến vé" Padding="12,7" Margin="0,0,8,0"
+                    Visibility="Collapsed" Click="ContinueButton_Click"/>
+            <Button Content="Đóng" Padding="12,7" Click="CloseButton_Click"/>
+        </WrapPanel>
     </Grid>
 </Window>

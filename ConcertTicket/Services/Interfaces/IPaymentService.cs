@@ -11,8 +11,13 @@ public interface IPaymentService
     //WebView2 hỏi: URL sắp chuyển tới có phải ReturnUrl không?
     bool IsReturnUrl(string url);
 
-    //kiểm chữ ký, đọc kết quả, rồi ghi trong 1 lần SaveChanges:
-    //  thêm Payment + Order Paid/Failed + PaidAt + cộng Zone.SoldQuantity (nếu Paid)
-    //chữ ký sai thì không ghi gì, trả IsSuccess = false
+    // Return chỉ xác thực và đọc DB; IPN mới được xác nhận thanh toán và cập nhật tồn kho.
     PaymentResult ProcessReturnUrl(string url);
+
+    Task<string> CreatePaymentUrlAsync(Order order, CancellationToken cancellationToken = default);
+
+    Task<PaymentResult> ProcessReturnUrlAsync(string url, CancellationToken cancellationToken = default);
+
+    // Đọc xác nhận do backend/IPN lưu, không gọi QueryDR hoặc tự xác nhận.
+    Task<PaymentResult> CheckPaymentStatusAsync(int orderId, CancellationToken cancellationToken = default);
 }
