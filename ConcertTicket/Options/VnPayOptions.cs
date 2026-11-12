@@ -10,6 +10,8 @@ public class VnPayOptions
 
     public int PaymentTimeoutMinutes { get; set; } = 15;
 
+    public int QueryTimeoutSeconds { get; set; } = 10;
+
     // Sandbox desktop không có HTTP request để lấy IP của trình duyệt.
     public string IpAddress { get; set; } = "127.0.0.1";
 }

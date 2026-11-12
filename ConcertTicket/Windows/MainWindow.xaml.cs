@@ -1,5 +1,8 @@
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Controls;
+using System.Diagnostics;
+using System.Globalization;
 using ConcertTicket.Models;
 using ConcertTicket.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
@@ -13,6 +16,7 @@ public partial class MainWindow : Window
     private readonly IUserSession _session;
     private readonly IAuthService _auth;
     private readonly INavigationService _nav;
+    private bool _loadingPaymentHistory;
 
     public MainWindow(IDbContextFactory<ConcertDbContext> dbFactory, IUserSession session,
                       IAuthService auth, INavigationService nav)
@@ -64,5 +68,52 @@ public partial class MainWindow : Window
         await _auth.LogoutAsync();
         _nav.ShowLogin();
         Close();
+    }
+
+    private async void PaymentHistoryButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_loadingPaymentHistory || _session.CurrentUser is not { Id: > 0 } user) return;
+        _loadingPaymentHistory = true;
+        PaymentHistoryButton.IsEnabled = false;
+        try
+        {
+            var orders = await ReadPaymentOrdersAsync(user.Id);
+            if (_session.CurrentUser?.Id != user.Id || !IsLoaded) return;
+            var menu = new ContextMenu { PlacementTarget = PaymentHistoryButton };
+            foreach (Order order in orders)
+            {
+                string status = order.Status switch { "Paid" => "Đã xác nhận", "Failed" => "Không thành công", _ => "Chờ kiểm tra" };
+                var item = new MenuItem { Header = $"Đơn #{order.Id} · {order.TotalAmount.ToString("N0", CultureInfo.GetCultureInfo("vi-VN"))} VND · {status}" };
+                item.Click += (_, _) => OpenPaymentHistoryOrder(order.Id);
+                menu.Items.Add(item);
+            }
+            if (orders.Count == 0) menu.Items.Add(new MenuItem { Header = "Chưa có phiên thanh toán được ghi nhận.", IsEnabled = false });
+            PaymentHistoryButton.ContextMenu = menu;
+            menu.IsOpen = true;
+        }
+        catch (Exception exception)
+        {
+            Trace.TraceError("Payment history failed: {0}", exception.GetType().Name);
+            MessageBox.Show("Không tải được lịch sử thanh toán. Kiểm tra database và migration PaymentRecovery.", "Thông báo", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally { _loadingPaymentHistory = false; PaymentHistoryButton.IsEnabled = true; }
+    }
+
+    private void OpenPaymentHistoryOrder(int orderId)
+    {
+        try { if (_nav.ShowPayment(orderId)) _nav.ShowTicket(orderId); }
+        catch (Exception exception)
+        {
+            Trace.TraceError("Payment history navigation failed: {0}", exception.GetType().Name);
+            MessageBox.Show("Không mở được đơn thanh toán. Vui lòng thử lại.", "Thông báo", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private async Task<List<Order>> ReadPaymentOrdersAsync(int userId)
+    {
+        await using var ctx = await _dbFactory.CreateDbContextAsync();
+        return await ctx.Orders.AsNoTracking().Where(o => o.UserId == userId
+                && (ctx.PaymentCheckouts.Any(c => c.OrderId == o.Id) || ctx.Payments.Any(p => p.OrderId == o.Id)))
+            .OrderByDescending(o => o.CreatedAt).Take(20).ToListAsync();
     }
 }

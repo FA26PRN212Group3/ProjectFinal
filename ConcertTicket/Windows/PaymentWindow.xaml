@@ -10,6 +10,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         <StackPanel Grid.Row="0" Margin="0,0,0,10">
             <TextBlock x:Name="OrderSummaryTextBlock" FontSize="18" FontWeight="Bold" TextWrapping="Wrap"/>
@@ -21,11 +22,41 @@
             <ProgressBar x:Name="LoadingProgressBar" IsIndeterminate="True" Height="4" Margin="0,8,0,0"/>
         </StackPanel>
         <wv2:WebView2 x:Name="PaymentWebView" Grid.Row="2" Visibility="Collapsed"/>
-        <WrapPanel Grid.Row="3" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <Expander Grid.Row="3" Header="Lịch sử thanh toán" IsExpanded="True" Margin="0,10,0,0">
+            <StackPanel>
+                <TextBlock x:Name="TimelineStatusTextBlock" Foreground="Gray" Margin="0,0,0,4" TextWrapping="Wrap"/>
+                <DataGrid x:Name="PaymentActivityGrid" Height="170" IsReadOnly="True" AutoGenerateColumns="False"
+                          CanUserAddRows="False" HeadersVisibility="Column">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Outcome}" Value="Success"><Setter Property="Background" Value="#E8F5E9"/></DataTrigger>
+                                <DataTrigger Binding="{Binding Outcome}" Value="Failed"><Setter Property="Background" Value="#FFEBEE"/></DataTrigger>
+                                <DataTrigger Binding="{Binding Outcome}" Value="Warning"><Setter Property="Background" Value="#FFF8E1"/></DataTrigger>
+                                <DataTrigger Binding="{Binding Outcome}" Value="Pending"><Setter Property="Background" Value="#E3F2FD"/></DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Thời gian UTC" Binding="{Binding OccurredAt, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="145"/>
+                        <DataGridTextColumn Header="Trạng thái" Binding="{Binding Outcome}" Width="80"/>
+                        <DataGridTextColumn Header="Sự kiện" Binding="{Binding EventType}" Width="175"/>
+                        <DataGridTextColumn Header="Nội dung" Binding="{Binding Details}" Width="*" MinWidth="300">
+                            <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/></Style>
+                            </DataGridTextColumn.ElementStyle>
+                        </DataGridTextColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </StackPanel>
+        </Expander>
+        <WrapPanel Grid.Row="4" HorizontalAlignment="Right" Margin="0,12,0,0">
             <Button x:Name="ReloadButton" Content="Tải lại trang thanh toán" Padding="12,7" Margin="0,0,8,0"
                     IsEnabled="False" Click="ReloadButton_Click"/>
             <Button x:Name="CheckStatusButton" Content="Kiểm tra xác nhận" Padding="12,7" Margin="0,0,8,0"
                     IsEnabled="False" Click="CheckStatusButton_Click"/>
+            <Button x:Name="ReconcileButton" Content="Đối soát VNPAY" Padding="12,7" Margin="0,0,8,0"
+                    IsEnabled="False" Click="ReconcileButton_Click"/>
             <Button x:Name="ContinueButton" Content="Tiếp tục đến vé" Padding="12,7" Margin="0,0,8,0"
                     Visibility="Collapsed" Click="ContinueButton_Click"/>
             <Button Content="Đóng" Padding="12,7" Click="CloseButton_Click"/>

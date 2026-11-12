@@ -22,4 +22,10 @@ public interface IPaymentService
     Task<PaymentResult> CheckPaymentStatusAsync(int orderId, CancellationToken cancellationToken = default);
 
     Task<VnPayIpnResponse> ProcessIpnAsync(string queryString, CancellationToken cancellationToken = default);
+
+    Task<PaymentResult> ReconcilePaymentAsync(int orderId, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<PaymentActivity>> GetPaymentActivityAsync(int orderId, CancellationToken cancellationToken = default);
+
+    Task RecordPaymentPageOpenedAsync(int orderId, CancellationToken cancellationToken = default);
 }

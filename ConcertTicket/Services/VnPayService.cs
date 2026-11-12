@@ -1,6 +1,7 @@
 using System.Data;
 using System.Globalization;
 using System.Net;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -14,22 +15,24 @@ using Microsoft.Extensions.Options;
 
 namespace ConcertTicket.Services;
 
-public class VnPayService : IPaymentService
+public partial class VnPayService : IPaymentService
 {
     private readonly IOptions<VnPayOptions> _options;
     private readonly IDbContextFactory<ConcertDbContext> _dbFactory;
     private readonly ILogger<VnPayService> _logger;
     private readonly TimeProvider _time;
+    private readonly IHttpClientFactory? _httpClients;
     private readonly object _attemptLock = new();
     private readonly Dictionary<int, PaymentAttempt> _attempts = [];
 
     public VnPayService(IOptions<VnPayOptions> options, IDbContextFactory<ConcertDbContext> dbFactory,
-                        ILogger<VnPayService> logger, TimeProvider? timeProvider = null)
+                        ILogger<VnPayService> logger, TimeProvider? timeProvider = null, IHttpClientFactory? httpClients = null)
     {
         _options = options;
         _dbFactory = dbFactory;
         _logger = logger;
         _time = timeProvider ?? TimeProvider.System;
+        _httpClients = httpClients;
     }
 
     public string CreatePaymentUrl(Order order)
@@ -57,6 +60,11 @@ public class VnPayService : IPaymentService
         if (!IsValidOrder(saved))
             throw new InvalidOperationException("Thông tin hoặc số tiền của đơn không hợp lệ cho VNPAY.");
 
+        PaymentCheckout checkout = await GetOrCreateCheckoutAsync(saved, options, cancellationToken).ConfigureAwait(false);
+        DateTimeOffset expires = ParseVietnamDate(checkout.ExpireDate);
+        if (expires <= _time.GetUtcNow())
+            throw new InvalidOperationException("Phiên thanh toán đã hết hạn. Vui lòng đối soát, không thanh toán lại.");
+
         lock (_attemptLock)
         {
             if (_attempts.TryGetValue(saved.Id, out PaymentAttempt? existing))
@@ -70,23 +78,21 @@ public class VnPayService : IPaymentService
                 return existing.Url!;
             }
 
-            DateTimeOffset now = _time.GetUtcNow();
-            DateTimeOffset expires = now.AddMinutes(options.PaymentTimeoutMinutes);
             var parameters = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["vnp_Version"] = "2.1.0",
                 ["vnp_Command"] = "pay",
                 ["vnp_TmnCode"] = options.TmnCode,
                 ["vnp_Amount"] = FormatPaymentAmount(saved),
-                ["vnp_CreateDate"] = FormatVietnamTimestamp(now),
-                ["vnp_ExpireDate"] = FormatVietnamTimestamp(expires),
+                ["vnp_CreateDate"] = checkout.CreateDate,
+                ["vnp_ExpireDate"] = checkout.ExpireDate,
                 ["vnp_CurrCode"] = "VND",
-                ["vnp_IpAddr"] = options.IpAddress,
+                ["vnp_IpAddr"] = checkout.IpAddress,
                 ["vnp_Locale"] = "vn",
                 ["vnp_OrderInfo"] = CreateOrderInformation(saved.Id),
                 ["vnp_OrderType"] = "other",
-                ["vnp_ReturnUrl"] = options.ReturnUrl,
-                ["vnp_TxnRef"] = GetTransactionReference(saved)
+                ["vnp_ReturnUrl"] = checkout.ReturnUrl,
+                ["vnp_TxnRef"] = checkout.TxnRef
             };
             string query = BuildQueryString(parameters);
             string signature = CreateSignature(query, options.HashSecret);
@@ -101,7 +107,12 @@ public class VnPayService : IPaymentService
         VnPayOptions options = GetValidatedOptions();
         if (!IsReturnUrl(url) || url.Length > 16_384) return InvalidReturn();
         var error = ReadNotification(new Uri(url).Query, options, out var data, out int orderId);
-        if (error != null) return InvalidReturn();
+        if (error != null)
+        {
+            if (error.RspCode == "97")
+                await RecordActivityAsync(null, "HmacRejected", "Warning", "return-rejected:" + Guid.NewGuid().ToString("N"), cancellationToken).ConfigureAwait(false);
+            return InvalidReturn();
+        }
 
         Order? order = await ReadOrderAsync(orderId, cancellationToken).ConfigureAwait(false);
         if (order == null || !IsValidOrder(order)
@@ -111,6 +122,8 @@ public class VnPayService : IPaymentService
             return InvalidReturn();
 
         string response = data["vnp_ResponseCode"];
+        string returnKey = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(data["vnp_SecureHash"])));
+        await RecordActivityAsync(orderId, "ReturnUrlReceived", "Pending", "return:" + returnKey, cancellationToken).ConfigureAwait(false);
         string transactionNo = data["vnp_TransactionNo"];
         bool reportedSuccess = IsSuccessfulPayment(data);
 
@@ -144,7 +157,7 @@ public class VnPayService : IPaymentService
                 attempt.ReturnResult.State = PaymentState.AwaitingConfirmation;
                 attempt.ReturnResult.Message = "Đang chờ xác nhận thanh toán trong hệ thống.";
             }
-            if (!duplicate) _logger.LogInformation("VNPAY return verified for order {OrderId}; no database writes.", order.Id);
+            if (!duplicate) _logger.LogInformation("VNPAY return verified for order {OrderId}; payment state unchanged.", order.Id);
             return result;
         }
     }
@@ -164,6 +177,10 @@ public class VnPayService : IPaymentService
                     return Result(orderId, PaymentState.Expired, "Phiên thanh toán đã hết hạn. Vui lòng kiểm tra xác nhận trước khi đặt đơn khác.");
             }
         }
+        await using var ctx = await _dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        PaymentCheckout? checkout = await ctx.PaymentCheckouts.AsNoTracking().SingleOrDefaultAsync(c => c.OrderId == orderId, cancellationToken).ConfigureAwait(false);
+        if (checkout != null && ParseVietnamDate(checkout.ExpireDate) <= _time.GetUtcNow())
+            return Result(orderId, PaymentState.Expired, "Phiên thanh toán đã hết hạn. Vui lòng đối soát trước khi đặt đơn khác.");
         return result;
     }
 
@@ -187,21 +204,22 @@ public class VnPayService : IPaymentService
             VnPayOptions options = GetValidatedOptions();
 
             var error = ReadNotification(queryString, options, out var parameters, out int orderId);
-            if (error != null) return error;
+            if (error != null)
+            {
+                if (error.RspCode == "97")
+                    await RecordActivityAsync(null, "HmacRejected", "Warning", "rejected:" + Guid.NewGuid().ToString("N"), cancellationToken).ConfigureAwait(false);
+                return error;
+            }
+            string eventId = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(parameters["vnp_SecureHash"])));
+            await RecordActivityAsync(orderId, "IpnReceived", "Pending", "ipn:" + eventId, cancellationToken).ConfigureAwait(false);
+            await RecordActivityAsync(orderId, "HmacVerified", "Success", "verified:" + eventId, cancellationToken).ConfigureAwait(false);
             if (!IsFinalIpnStatus(parameters))
                 return IpnResponse("99", "Invalid or unresolved transaction status");
 
-            for (int attempt = 0; attempt < 3; attempt++)
-            {
-                try
-                {
-                    return await ConfirmIpnAsync(orderId, parameters, options.TmnCode, cancellationToken).ConfigureAwait(false);
-                }
-                catch (SqlException exception) when (exception.Number == 1205 && attempt < 2)
-                {
-                    await Task.Delay(50 * (attempt + 1), cancellationToken).ConfigureAwait(false);
-                }
-            }
+            VnPayIpnResponse processed = await ConfirmWithRetryAsync(orderId, parameters, options.TmnCode, cancellationToken).ConfigureAwait(false);
+            if (processed.RspCode == "02")
+                await RecordActivityAsync(orderId, "DuplicateIpnIgnored", "Warning", "duplicate:" + eventId, cancellationToken).ConfigureAwait(false);
+            return processed;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -215,12 +233,13 @@ public class VnPayService : IPaymentService
         return IpnResponse("99", "Unable to confirm transaction");
     }
 
-    private async Task<VnPayIpnResponse> ConfirmIpnAsync(int orderId, Dictionary<string, string> parameters,
+    private async Task<VnPayIpnResponse> ConfirmTransactionAsync(int orderId, Dictionary<string, string> parameters,
         string terminalCode, CancellationToken cancellationToken)
     {
         await using var ctx = await _dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         ctx.Database.SetCommandTimeout(10);
         await using var transaction = await ctx.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false);
+        await RecordActivityAsync(orderId, "DatabaseTransactionStarted", "Pending", "transaction:" + Guid.NewGuid().ToString("N"), cancellationToken).ConfigureAwait(false);
 
         string transactionNumber = parameters["vnp_TransactionNo"];
         if (transactionNumber.Any(character => character != '0'))
@@ -310,8 +329,13 @@ public class VnPayService : IPaymentService
             ResponseCode = parameters["vnp_ResponseCode"]
         });
 
+        string finalEvent = order.Status == "Paid" ? "PaymentConfirmed" : isSuccessful ? "ReconciliationRequired" : "PaymentFailed";
+        ctx.PaymentActivities.Add(Activity(orderId, finalEvent, order.Status == "Paid" ? "Success" : isSuccessful ? "Warning" : "Failed", "settled:" + orderId));
+        if (order.Status == "Paid")
+            ctx.PaymentActivities.Add(Activity(orderId, "TicketIssuanceReady", "Success", "ticket-ready:" + orderId));
         await ctx.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation("Payment settlement committed for order {OrderId}: {Status}.", orderId, order.Status);
         return IpnResponse("00", "Confirm Success");
     }
 

@@ -1,5 +1,6 @@
 ﻿using System.Windows;
 using System.Windows.Threading;
+using System.Net.Http;
 using ConcertTicket.Models;
 using ConcertTicket.Options;
 using ConcertTicket.Services;
@@ -52,6 +53,12 @@ public partial class App : Application
         builder.Services.AddSingleton<IAuthService, GoogleAuthService>();
         builder.Services.AddSingleton<INavigationService, NavigationService>();
         builder.Services.AddSingleton<IPaymentService, VnPayService>();
+        builder.Services.AddHttpClient("VnPayQuery", client =>
+        {
+            client.Timeout = Timeout.InfiniteTimeSpan;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("ConcertTicket/1.0");
+        })
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         builder.Services.AddHostedService<VnPayIpnListener>();
         builder.Services.AddSingleton<ITicketService, TicketService>();
         builder.Services.AddSingleton<ICalendarService, GoogleCalendarService>();

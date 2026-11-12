@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Windows;
+using System.Windows.Threading;
 using ConcertTicket.Models;
 using ConcertTicket.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
@@ -16,6 +17,8 @@ public partial class PaymentWindow : Window
     private readonly int _orderId;
     private readonly IUserSession _session;
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly DispatcherTimer _statusTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    private bool _timelineRefreshing;
     private bool _loading;
     private bool _checking;
     private bool _returnProcessing;
@@ -38,11 +41,16 @@ public partial class PaymentWindow : Window
         Closed += PaymentWindow_Closed;
         PaymentWebView.NavigationStarting += PaymentWebView_NavigationStarting;
         PaymentWebView.NavigationCompleted += PaymentWebView_NavigationCompleted;
+        _statusTimer.Tick += StatusTimer_Tick;
     }
 
     private bool IsBusy => _loading || _checking || _returnProcessing;
 
-    private async void PaymentWindow_Loaded(object sender, RoutedEventArgs e) => await LoadPaymentAsync();
+    private async void PaymentWindow_Loaded(object sender, RoutedEventArgs e)
+    {
+        _statusTimer.Start();
+        await LoadPaymentAsync();
+    }
     private async void ReloadButton_Click(object sender, RoutedEventArgs e) => await LoadPaymentAsync();
     private async void CheckStatusButton_Click(object sender, RoutedEventArgs e) => await RefreshStatusAsync();
     private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
@@ -58,11 +66,13 @@ public partial class PaymentWindow : Window
             Order order = await ReadOwnedOrderAsync();
             if (_closed) return;
             OrderSummaryTextBlock.Text = $"Đơn #{order.Id} · {order.TotalAmount.ToString("N0", CultureInfo.GetCultureInfo("vi-VN"))} VND";
+            await RefreshTimelineAsync();
             PaymentResult status = await _payment.CheckPaymentStatusAsync(_orderId, _lifetime.Token);
             if (_closed) return;
             if (status.State != PaymentState.Pending) { Display(status); return; }
 
             string url = await _payment.CreatePaymentUrlAsync(order, _lifetime.Token);
+            await RefreshTimelineAsync();
             if (_closed) return;
             bool initialize = PaymentWebView.CoreWebView2 == null;
             await PaymentWebView.EnsureCoreWebView2Async();
@@ -163,7 +173,7 @@ public partial class PaymentWindow : Window
         }
     }
 
-    private void PaymentWebView_NavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
+    private async void PaymentWebView_NavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
     {
         if (_closed || _returnHandled) return;
         _browserLoading = false;
@@ -175,6 +185,13 @@ public partial class PaymentWindow : Window
             return;
         }
         PaymentStatusTextBlock.Text = "Vui lòng thực hiện thanh toán trên VNPAY Sandbox. Đóng cửa sổ không làm đơn thất bại.";
+        try
+        {
+            await _payment.RecordPaymentPageOpenedAsync(_orderId, _lifetime.Token);
+            await RefreshTimelineAsync();
+        }
+        catch (OperationCanceledException) when (_closed) { }
+        catch (Exception exception) { Trace.TraceError("Payment activity failed: {0}", exception.GetType().Name); }
     }
 
     private async void Core_NewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
@@ -218,6 +235,55 @@ public partial class PaymentWindow : Window
             _checking = false;
             if (!_closed) UpdateControls();
         }
+        await RefreshTimelineAsync();
+    }
+
+    private async void ReconcileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_closed || IsBusy) return;
+        _checking = true;
+        UpdateControls();
+        PaymentStatusTextBlock.Text = "Đang truy vấn kết quả từ VNPAY Sandbox...";
+        try
+        {
+            await ReadOwnedOrderAsync();
+            PaymentResult result = await _payment.ReconcilePaymentAsync(_orderId, _lifetime.Token);
+            if (!_closed) Display(result);
+        }
+        catch (OperationCanceledException) when (_closed) { }
+        catch (Exception exception) { ReportError(exception, "Chưa thể đối soát. Đơn vẫn giữ trạng thái trong database; vui lòng kiểm tra lại."); }
+        finally
+        {
+            _checking = false;
+            if (!_closed) UpdateControls();
+        }
+        await RefreshTimelineAsync();
+    }
+
+    private async void StatusTimer_Tick(object? sender, EventArgs e)
+    {
+        if (!_closed && !IsBusy && !_browserLoading) await RefreshStatusAsync();
+    }
+
+    private async Task RefreshTimelineAsync()
+    {
+        if (_closed || _timelineRefreshing) return;
+        _timelineRefreshing = true;
+        try
+        {
+            await ReadOwnedOrderAsync();
+            IReadOnlyList<PaymentActivity> activities = await _payment.GetPaymentActivityAsync(_orderId, _lifetime.Token);
+            if (_closed) return;
+            PaymentActivityGrid.ItemsSource = activities;
+            TimelineStatusTextBlock.Text = activities.Count == 0 ? "Chưa có sự kiện được ghi nhận." : "Tự cập nhật mỗi 5 giây; tối đa 500 sự kiện.";
+        }
+        catch (OperationCanceledException) when (_closed) { }
+        catch (Exception exception)
+        {
+            Trace.TraceError("Payment timeline failed: {0}", exception.GetType().Name);
+            if (!_closed) TimelineStatusTextBlock.Text = "Chưa tải được lịch sử. Kiểm tra kết nối và migration PaymentRecovery.";
+        }
+        finally { _timelineRefreshing = false; }
     }
 
     private async void ContinueButton_Click(object sender, RoutedEventArgs e) => await RefreshStatusAsync(continueToTickets: true);
@@ -254,12 +320,15 @@ public partial class PaymentWindow : Window
         LoadingProgressBar.Visibility = IsBusy || _browserLoading ? Visibility.Visible : Visibility.Collapsed;
         ReloadButton.IsEnabled = !IsBusy && !_browserLoading && _canLoad && !_returnHandled;
         CheckStatusButton.IsEnabled = !IsBusy;
+        ReconcileButton.IsEnabled = !IsBusy && _state != PaymentState.Confirmed;
         ContinueButton.IsEnabled = !IsBusy && _state == PaymentState.Confirmed;
     }
 
     private void PaymentWindow_Closed(object? sender, EventArgs e)
     {
         _closed = true;
+        _statusTimer.Stop();
+        _statusTimer.Tick -= StatusTimer_Tick;
         _lifetime.Cancel();
         Loaded -= PaymentWindow_Loaded;
         PaymentWebView.NavigationStarting -= PaymentWebView_NavigationStarting;
