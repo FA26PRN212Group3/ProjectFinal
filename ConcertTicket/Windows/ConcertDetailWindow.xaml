@@ -9,6 +9,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <TextBlock x:Name="ConcertNameTextBlock" Grid.Row="0" FontSize="22" FontWeight="Bold" TextWrapping="Wrap"/>
@@ -26,9 +27,17 @@
             </DataGrid.Columns>
         </DataGrid>
 
-        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <DockPanel Grid.Row="3" Margin="0,12,0,0">
+            <Button x:Name="RefreshButton" DockPanel.Dock="Right" Content="Tải lại" Width="80" Height="30"
+                    Margin="12,0,0,0" Click="RefreshButton_Click"/>
+            <TextBlock x:Name="BookingStatusTextBlock" VerticalAlignment="Center" TextWrapping="Wrap"
+                       Foreground="DarkRed" AutomationProperties.LiveSetting="Polite"/>
+        </DockPanel>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
             <TextBlock Text="Số lượng (1-4):" VerticalAlignment="Center" Margin="0,0,8,0"/>
-            <TextBox x:Name="QuantityTextBox" Width="60" Height="30" Text="1" VerticalContentAlignment="Center"/>
+            <TextBox x:Name="QuantityTextBox" Width="60" Height="30" Text="1" VerticalContentAlignment="Center"
+                     TextChanged="QuantityTextBox_TextChanged"/>
             <TextBlock x:Name="TotalTextBlock" VerticalAlignment="Center" FontWeight="Bold" Margin="16,0,16,0"/>
             <Button x:Name="PayButton" Content="Thanh toán" Width="140" Height="36" Click="PayButton_Click"/>
         </StackPanel>

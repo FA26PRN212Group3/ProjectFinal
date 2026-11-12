@@ -11,6 +11,7 @@ namespace ConcertTicket.Services;
 public class NavigationService : INavigationService
 {
     private readonly IServiceProvider _provider;
+    private readonly Dictionary<int, PaymentWindow> _paymentWindows = [];
 
     public NavigationService(IServiceProvider provider)
     {
@@ -39,9 +40,19 @@ public class NavigationService : INavigationService
 
     public bool ShowPayment(int orderId)
     {
+        if (_paymentWindows.TryGetValue(orderId, out PaymentWindow? opened))
+        {
+            opened.Activate();
+            return false;
+        }
         var win = ActivatorUtilities.CreateInstance<PaymentWindow>(_provider, orderId);
         win.Owner = GetActiveWindow();
-        return win.ShowDialog() == true;   //PaymentWindow đặt DialogResult = true khi thanh toán thành công
+        _paymentWindows.Add(orderId, win);
+        try
+        {
+            return win.ShowDialog() == true; // Chỉ true sau khi đọc xác nhận Order + Payment trong DB.
+        }
+        finally { _paymentWindows.Remove(orderId); }
     }
 
     public void ShowTicket(int orderId)
