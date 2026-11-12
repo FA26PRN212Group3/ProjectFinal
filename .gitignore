@@ -6,6 +6,9 @@
 # dotenv files
 .env
 
+# key bí mật của từng máy, KHÔNG push
+appsettings.Development.json
+
 # User-specific files
 *.rsuser
 *.suo
