@@ -24,7 +24,7 @@ App WPF đặt vé concert: đăng nhập Google, chọn vé theo khu, thanh to�
    dotnet user-secrets set "ConnectionStrings:ConcertDb" "Server=(local);uid=sa;pwd=...;database=ConcertTicketDB;TrustServerCertificate=True"
    ```
 
-4. Mở `ConcertTicket.slnx` bằng Visual Studio, bấm Run. Chưa có key Google thì bấm **"Vào thử (bỏ qua Google)"** để vào thẳng MainWindow (nút này chỉ có ở bản Debug).
+4. Mở `ConcertTicket.slnx` bằng Visual Studio, bấm Run, bấm **"Đăng nhập bằng Google"**. Email Google phải nằm trong danh sách Test users của OAuth app (nhờ Huy thêm), nếu không Google báo `403: access_denied`.
 
 ## Cấu trúc
 

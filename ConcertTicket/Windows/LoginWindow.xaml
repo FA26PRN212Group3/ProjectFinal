@@ -9,7 +9,6 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" Text="Concert Ticket" FontSize="28" FontWeight="Bold" HorizontalAlignment="Center"/>
@@ -17,10 +16,8 @@
                    Foreground="Gray" HorizontalAlignment="Center" Margin="0,8,0,0"/>
 
         <Button x:Name="GoogleLoginButton" Grid.Row="3" Content="Đăng nhập bằng Google"
-                Height="44" FontSize="16" Click="GoogleLoginButton_Click"/>
-
-        <!-- CHỈ ĐỂ TEST khi chưa có Google login, bản Release sẽ ẩn -->
-        <Button x:Name="DevLoginButton" Grid.Row="4" Content="Vào thử (bỏ qua Google)"
-                Height="32" Margin="0,12,0,0" Click="DevLoginButton_Click"/>
+                Height="44" FontSize="16" FontWeight="Bold"
+                Background="BurlyWood" Foreground="SteelBlue"
+                Click="GoogleLoginButton_Click"/>
     </Grid>
 </Window>
