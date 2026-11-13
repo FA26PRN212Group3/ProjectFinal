@@ -24,6 +24,16 @@ App WPF đặt vé concert: đăng nhập Google, chọn vé theo khu, thanh to�
 
 4. Mở `ConcertTicket.slnx` bằng Visual Studio, bấm Run, bấm **"Đăng nhập bằng Google"**. Email Google phải nằm trong danh sách Test users của OAuth app (nhờ Huy thêm), nếu không Google báo `403: access_denied`.
 
+Hoặc chạy từ thư mục solution: `dotnet run --project ConcertTicket`.
+
+## Tìm concert và phát hành vé (F2, F5)
+
+- Nhập tên concert, chọn địa điểm/ngày rồi bấm **Tìm** hoặc Enter. Các điều kiện được kết hợp; để trống tên/ngày và chọn **Tất cả địa điểm** để xem lại toàn bộ.
+- Đơn **Paid** thuộc tài khoản hiện tại được phát hành đúng số lượng vé đã mua. Mã có dạng `CON-yyyyMMdd-XXXXXX`, ngày lấy từ ngày diễn concert; vé mới có `Status = "Valid"`, cổng theo khu đã mua.
+- QR chỉ chứa đúng `TicketCode`, không thêm URL hay JSON. `CloudName`, `ApiKey`, `ApiSecret` phải được điền trong cấu hình Cloudinary ở file local bên trên. Ảnh PNG được upload vào `Cloudinary:Folder`; danh sách vé hiển thị QR, mã vé, khu, cổng và trạng thái.
+- Mã vé được lưu trước khi upload. Nếu upload hoặc lưu link lỗi, bấm **Thử lại vé**: giữ nguyên mã, chỉ bổ sung vé/QR còn thiếu. Gọi đồng thời không phát hành vượt số lượng; ảnh dùng PublicId cố định theo mã vé và không ghi đè.
+- Xem lại đơn đã trả tiền qua **Lịch sử thanh toán** để mở lại vé. Không cần thanh toán lại khi QR hoặc Calendar gặp lỗi.
+
 ## Google Calendar (F6): setup và sử dụng
 
 1. Trong [Google Cloud Console](https://console.cloud.google.com/), chọn cùng project đang dùng cho đăng nhập Google. Vào **APIs & Services → Library**, tìm **Google Calendar API**, bấm **Enable**.
@@ -34,7 +44,7 @@ App WPF đặt vé concert: đăng nhập Google, chọn vé theo khu, thanh to�
 6. Khi hiện **"Đã thêm lịch, nhắc trước 1 ngày."**, bấm **Mở Google Calendar**. Sự kiện chứa tên concert, giờ bắt đầu/kết thúc, địa điểm, khu, cổng, từng mã vé và URL ảnh QR. Giờ concert trong DB được hiểu là giờ Việt Nam (`Asia/Ho_Chi_Minh`, UTC+7).
 7. Nếu thêm lịch lỗi, vé vẫn hiển thị; bấm **Thử lại Calendar** sau khi khắc phục. Mở lại màn vé hoặc thử lại không tạo thêm sự kiện cho cùng đơn. Lỗi Calendar không thay đổi trạng thái thanh toán.
 
-**Điều kiện tích hợp:** `VnPayService` và `TicketService` hiện vẫn còn `TODO` của phần thanh toán/phát hành vé. Luồng mua mới chỉ chạy đến Calendar sau khi hai phần này hoàn thành. F6 dùng được với đơn `Paid` đã có đủ vé trong DB; không cần sửa schema.
+**Điều kiện tích hợp:** thanh toán phải được hệ thống xác nhận **Paid**, Cloudinary trả đủ link QR, tài khoản Google đã cấp quyền Calendar. Lỗi QR cho phép thử lại vé; lỗi Calendar vẫn giữ vé để sử dụng.
 
 ### Code liên quan
 
@@ -55,9 +65,9 @@ dotnet build ConcertTicket.slnx
 dotnet run --project ConcertTicket.Tests
 ```
 
-Test dùng SQL Server LocalDB thật với database tạm tên `ConcertTicketCalendarTests_<GUID>`, tự xóa trong `finally`. Không chạy script reset DB của app. Google HTTP được giả lập ngay trong test, không dùng key/token thật và không tạo sự kiện trong tài khoản Google.
+Test dùng SQL Server LocalDB thật với database tạm tên `ConcertTicketCalendarTests_<GUID>`, tự xóa trong `finally`. Không chạy script reset DB của app. Google và Cloudinary HTTP được giả lập ngay trong test, không dùng key/token thật và không thay đổi tài khoản bên ngoài. QR hiển thị trong test đọc từ PNG local.
 
-Các ca kiểm tra gồm nội dung sự kiện, UTC+7, nhắc trước một ngày, chủ đơn/quyền truy cập, đơn chưa thanh toán hoặc thiếu vé, chống trùng khi gọi lại/đồng thời, khôi phục sau lỗi lưu DB, chặn link không an toàn, màn WPF khi đang chờ/thành công/lỗi và nút thử lại. Ảnh kiểm tra giao diện `calendar-success.png` và `calendar-retry.png` nằm trong thư mục output của `ConcertTicket.Tests`.
+Các ca kiểm tra gồm bộ lọc tên/địa điểm/ngày, mã vé và nội dung QR chỉ chứa TicketCode, quyền chủ đơn, trạng thái thanh toán, số lượng vé, thử lại khi thiếu key/upload/lưu DB lỗi, phát hành đồng thời, link ảnh an toàn; cùng các ca Calendar về nội dung sự kiện, UTC+7, nhắc trước một ngày, chống trùng và khôi phục sau lỗi. Ảnh kiểm tra giao diện `concert-search.png`, `ticket-qr.png`, `calendar-success.png`, `calendar-retry.png` nằm trong thư mục output của `ConcertTicket.Tests`.
 
 ### Xử lý lỗi khi demo thật
 
@@ -65,7 +75,7 @@ Các ca kiểm tra gồm nội dung sự kiện, UTC+7, nhắc trước một ng
 | --- | --- |
 | `403: access_denied` khi đăng nhập | Thêm đúng email vào Test users của OAuth project. |
 | Không có quyền Calendar / HTTP 401, 403 | Bật Google Calendar API đúng project, kiểm tra scope, đăng xuất rồi đăng nhập lại và cấp quyền. |
-| Chưa phát hành đủ vé / `TODO (Bảo): IssueTicketsAsync` | Hoàn thành F5 hoặc dùng đơn đã phát hành đủ vé để demo F6. |
+| Không tải được QR / thiếu cấu hình Cloudinary | Điền đúng CloudName, ApiKey, ApiSecret trong cấu hình local; mở lại app để nhận cấu hình mới rồi vào Lịch sử thanh toán, chọn lại đơn. Khi chỉ lỗi mạng, bấm Thử lại vé. |
 | Mất mạng hoặc quá thời gian chờ | Khôi phục mạng rồi bấm **Thử lại Calendar**. Yêu cầu thêm lịch có giới hạn chờ 30 giây. |
 | Google đã có sự kiện nhưng app báo lỗi lưu DB | Kiểm tra kết nối SQL Server rồi thử lại; app khôi phục liên kết tới sự kiện đã tạo. |
 | Bấm mở lịch nhưng không thấy sự kiện | Kiểm tra tài khoản đang đăng nhập trên trình duyệt có trùng tài khoản trong app. |

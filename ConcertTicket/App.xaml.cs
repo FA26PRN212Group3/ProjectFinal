@@ -60,6 +60,8 @@ public partial class App : Application
         })
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         builder.Services.AddHostedService<VnPayIpnListener>();
+        builder.Services.AddHttpClient("TicketQr", client => client.Timeout = TimeSpan.FromSeconds(30))
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         builder.Services.AddSingleton<ITicketService, TicketService>();
         builder.Services.AddSingleton<ICalendarService, GoogleCalendarService>();
 

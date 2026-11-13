@@ -1,7 +1,7 @@
 <Window x:Class="ConcertTicket.Windows.TicketWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Vé của bạn" Height="560" Width="720"
+        Title="Vé của bạn" Height="560" Width="720" MinHeight="380" MinWidth="600"
         WindowStartupLocation="CenterOwner">
     <Grid Margin="16">
         <Grid.RowDefinitions>
@@ -13,19 +13,41 @@
         <TextBlock x:Name="StatusTextBlock" Grid.Row="0" FontSize="18" FontWeight="Bold"
                    Text="Đang phát hành vé..." TextWrapping="Wrap"/>
 
-        <!-- TODO (Bảo): danh sách vé (mã vé, khu, gate, ảnh QR) -->
-        <ListBox x:Name="TicketListBox" Grid.Row="1" Margin="0,12,0,12" DisplayMemberPath="TicketCode"/>
+        <ListBox x:Name="TicketListBox" Grid.Row="1" Margin="0,12,0,12" HorizontalContentAlignment="Stretch"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="Danh sách vé">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <Grid Margin="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="180"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Image Source="{Binding QrImageUrl}" Width="160" Height="160" Stretch="Uniform"
+                               AutomationProperties.Name="{Binding TicketCode}"/>
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,0,0">
+                            <TextBlock Text="{Binding TicketCode}" FontSize="18" FontWeight="Bold" TextWrapping="Wrap"/>
+                            <TextBlock Text="{Binding Order.Zone.Name, StringFormat='Khu: {0}'}" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                            <TextBlock Text="{Binding Gate, StringFormat='Cổng: {0}'}" Margin="0,4,0,0"/>
+                            <TextBlock Text="{Binding Status, StringFormat='Trạng thái: {0}'}" Margin="0,4,0,0"/>
+                        </StackPanel>
+                    </Grid>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
 
         <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBlock x:Name="CalendarStatusTextBlock" VerticalAlignment="Center" Margin="0,0,16,0" TextWrapping="Wrap"/>
-            <Button x:Name="RetryCalendarButton" Grid.Column="1" Content="Thử lại Calendar" Width="130" Height="36"
+            <Button x:Name="RetryTicketsButton" Grid.Column="1" Content="Thử lại vé" Width="100" Height="36"
+                    Margin="0,0,8,0" Visibility="Collapsed" IsEnabled="False" Click="RetryTicketsButton_Click"/>
+            <Button x:Name="RetryCalendarButton" Grid.Column="2" Content="Thử lại Calendar" Width="130" Height="36"
                     Margin="0,0,8,0" Visibility="Collapsed" IsEnabled="False" Click="RetryCalendarButton_Click"/>
-            <Button x:Name="OpenCalendarButton" Grid.Column="2" Content="Mở Google Calendar" Width="170" Height="36"
+            <Button x:Name="OpenCalendarButton" Grid.Column="3" Content="Mở Google Calendar" Width="170" Height="36"
                     IsEnabled="False" Click="OpenCalendarButton_Click"/>
         </Grid>
     </Grid>

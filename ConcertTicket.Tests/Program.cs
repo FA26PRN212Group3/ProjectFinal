@@ -4,12 +4,14 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using ConcertTicket.Models;
+using ConcertTicket.Options;
 using ConcertTicket.Services;
 using ConcertTicket.Services.Interfaces;
 using ConcertTicket.Windows;
@@ -20,6 +22,8 @@ using Google.Apis.Auth.OAuth2.Responses;
 using Google.Apis.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using QRCoder;
 
 internal static class Program
 {
@@ -37,7 +41,7 @@ internal static class Program
         try
         {
             task.GetAwaiter().GetResult();
-            Console.WriteLine($"PASS: {_passed} calendar tests; no Google requests or application data changed.");
+            Console.WriteLine($"PASS: {_passed} tests; Google/Cloudinary HTTP mocked; no application data changed.");
             return 0;
         }
         catch (Exception ex)
@@ -107,8 +111,178 @@ internal static class Program
             async Task<Order> ReadOrder(int id)
             {
                 await using var db = factory.CreateDbContext();
-                return await db.Orders.AsNoTracking().Include(o => o.Tickets).SingleAsync(o => o.Id == id);
+                return await db.Orders.AsNoTracking().Include(o => o.Zone).Include(o => o.Tickets).SingleAsync(o => o.Id == id);
             }
+
+            TicketService TicketService(OfflineCloudinary cloud, CloudinaryOptions? settings = null) => new(
+                Options.Create(settings ?? new CloudinaryOptions { CloudName = "ticket-tests", ApiKey = "test-key", ApiSecret = "test-secret" }),
+                factory, NullLogger<TicketService>.Instance, session, new TestHttpClientFactory(cloud));
+
+            await Test("ticket issuance rejects invalid IDs, missing sessions, foreign and unpaid orders", async () =>
+            {
+                var cloud = new OfflineCloudinary();
+                var tickets = TicketService(cloud);
+                await Throws<ArgumentOutOfRangeException>(() => tickets.IssueTicketsAsync(0));
+                await Throws<InvalidOperationException>(() => tickets.IssueTicketsAsync(int.MaxValue));
+                var foreign = await NewOrder(tickets: 0, userId: otherUserId);
+                await Throws<InvalidOperationException>(() => tickets.IssueTicketsAsync(foreign.Id));
+                foreach (var status in new[] { "Pending", "Failed" })
+                {
+                    var unpaid = await NewOrder(status, tickets: 0);
+                    await Throws<InvalidOperationException>(() => tickets.IssueTicketsAsync(unpaid.Id));
+                    Assert((await ReadOrder(unpaid.Id)).Tickets.Count == 0, "unpaid order has no issued tickets");
+                }
+                var user = session.CurrentUser;
+                session.CurrentUser = null;
+                try { await Throws<InvalidOperationException>(() => tickets.IssueTicketsAsync(foreign.Id)); }
+                finally { session.CurrentUser = user; }
+                Assert(cloud.Requests == 0 && (await ReadOrder(foreign.Id)).Tickets.Count == 0, "no unauthorized upload or ticket");
+            });
+
+            await Test("paid orders get exact ticket quantity, Valid status, correct gate and code-only QR", async () =>
+            {
+                var order = await NewOrder(tickets: 0);
+                var cloud = new OfflineCloudinary();
+                var tickets = await TicketService(cloud).IssueTicketsAsync(order.Id);
+                var saved = await ReadOrder(order.Id);
+                Assert(tickets.Count == 2 && saved.Tickets.Count == 2 && cloud.Uploads.Count == 2, "quantity persisted and uploaded");
+                Assert(saved.Status == "Paid" && saved.PaidAt == order.PaidAt, "payment unchanged");
+                foreach (var ticket in tickets)
+                {
+                    Assert(Regex.IsMatch(ticket.TicketCode, "^CON-20301220-[A-Z0-9]{6}$"), "dated ticket code format");
+                    Assert(ticket.Status == "Valid" && ticket.Gate == "Gate A" && ticket.QrImageUrl!.StartsWith("https://res.cloudinary.com/ticket-tests/"), "ticket details");
+                    using var qrData = QRCodeGenerator.GenerateQrCode(ticket.TicketCode, QRCodeGenerator.ECCLevel.Q);
+                    using var qr = new PngByteQRCode(qrData);
+                    Assert(cloud.Uploads[ticket.TicketCode].SequenceEqual(qr.GetGraphic(8)), "QR payload is exactly TicketCode, with no URL or JSON");
+                    System.IO.File.WriteAllBytes(System.IO.Path.Combine(AppContext.BaseDirectory, ticket.TicketCode + ".png"), cloud.Uploads[ticket.TicketCode]);
+                }
+                int requests = cloud.Requests;
+                var again = await TicketService(cloud, new CloudinaryOptions()).IssueTicketsAsync(order.Id);
+                Assert(again.Select(t => t.Id).SequenceEqual(tickets.Select(t => t.Id)) && cloud.Requests == requests, "repeat returns existing tickets without keys or uploads");
+            });
+
+            await Test("ticket codes use the concert date and remain unique", async () =>
+            {
+                var tickets = TicketService(new OfflineCloudinary());
+                var codes = Enumerable.Range(0, 40).Select(_ => tickets.GenerateTicketCode(new DateTime(2031, 1, 2))).ToList();
+                Assert(codes.Distinct().Count() == codes.Count && codes.All(c => Regex.IsMatch(c, "^CON-20310102-[A-Z0-9]{6}$")), "unique, date-specific random codes");
+                await Throws<ArgumentException>(() => Task.FromResult(tickets.GenerateTicketCode(default)));
+            });
+
+            await Test("partial ticket sets preserve existing codes and Used status", async () =>
+            {
+                var order = await NewOrder(tickets: 1);
+                var original = order.Tickets.Single();
+                await using (var db = factory.CreateDbContext())
+                {
+                    var ticket = await db.Tickets.FindAsync(original.Id);
+                    ticket!.Status = "Used";
+                    await db.SaveChangesAsync();
+                }
+                var cloud = new OfflineCloudinary();
+                var issued = await TicketService(cloud).IssueTicketsAsync(order.Id);
+                Assert(issued.Count == 2 && cloud.Uploads.Count == 1, "only missing ticket issued");
+                var existing = issued.Single(t => t.Id == original.Id);
+                Assert(existing.TicketCode == original.TicketCode && existing.QrImageUrl == original.QrImageUrl && existing.Status == "Used", "existing ticket unchanged");
+            });
+
+            await Test("missing Cloudinary keys preserve ticket codes for retry", async () =>
+            {
+                var order = await NewOrder(tickets: 0);
+                var cloud = new OfflineCloudinary();
+                await Throws<InvalidOperationException>(() => TicketService(cloud, new CloudinaryOptions()).IssueTicketsAsync(order.Id));
+                var incomplete = await ReadOrder(order.Id);
+                Assert(incomplete.Tickets.Count == 2 && incomplete.Tickets.All(t => t.QrImageUrl == null) && cloud.Requests == 0, "codes saved without uploading");
+                var repaired = await TicketService(cloud).IssueTicketsAsync(order.Id);
+                Assert(repaired.Select(t => t.TicketCode).SequenceEqual(incomplete.Tickets.OrderBy(t => t.Id).Select(t => t.TicketCode)), "retry reuses codes");
+            });
+
+            await Test("partial upload failure retries only missing QR images", async () =>
+            {
+                var order = await NewOrder(tickets: 0);
+                var cloud = new OfflineCloudinary { FailOnRequest = 2 };
+                var tickets = TicketService(cloud);
+                await Throws<InvalidOperationException>(() => tickets.IssueTicketsAsync(order.Id));
+                var incomplete = await ReadOrder(order.Id);
+                Assert(incomplete.Tickets.Count == 2 && incomplete.Tickets.Count(t => t.QrImageUrl != null) == 1, "first image saved, all codes retained");
+                var repaired = await tickets.IssueTicketsAsync(order.Id);
+                Assert(cloud.Requests == 3 && cloud.Uploads.Count == 2 && repaired.All(t => t.QrImageUrl != null), "only failed image retried");
+            });
+
+            await Test("database failure after upload reuses the same Cloudinary public ID", async () =>
+            {
+                var order = await NewOrder(tickets: 0);
+                var cloud = new OfflineCloudinary { AfterUpload = () => factory.FailNextSave = true };
+                var tickets = TicketService(cloud);
+                await Throws<InvalidOperationException>(() => tickets.IssueTicketsAsync(order.Id));
+                var incomplete = await ReadOrder(order.Id);
+                Assert(incomplete.Tickets.Count == 2 && cloud.Uploads.Count == 1, "allocated codes survive failed URL persistence");
+                var repaired = await tickets.IssueTicketsAsync(order.Id);
+                Assert(cloud.Uploads.Count == 2 && repaired.Count == 2 && repaired.All(t => t.QrImageUrl != null), "retry creates no duplicate image or ticket");
+            });
+
+            await Test("concurrent service instances issue one ticket set", async () =>
+            {
+                var order = await NewOrder(tickets: 0);
+                var cloud = new OfflineCloudinary();
+                var results = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => TicketService(cloud).IssueTicketsAsync(order.Id)));
+                var saved = await ReadOrder(order.Id);
+                Assert(saved.Tickets.Count == 2 && cloud.Uploads.Count == 2 && results.All(r => r.Count == 2), "one set across four callers");
+                Assert(results.SelectMany(r => r.Select(t => t.TicketCode)).Distinct().Count() == 2, "same codes across callers");
+            });
+
+            await Test("unsafe Cloudinary image URLs are rejected and recoverable", async () =>
+            {
+                var order = await NewOrder(tickets: 0);
+                var cloud = new OfflineCloudinary { InvalidUrlOnce = true };
+                var tickets = TicketService(cloud);
+                await Throws<InvalidOperationException>(() => tickets.IssueTicketsAsync(order.Id));
+                Assert((await ReadOrder(order.Id)).Tickets.All(t => t.QrImageUrl == null), "unsafe URL never persisted");
+                Assert((await tickets.IssueTicketsAsync(order.Id)).All(t => t.QrImageUrl!.StartsWith("https://res.cloudinary.com/")), "retry repairs images");
+            });
+
+            await Test("concert search combines trimmed name, venue and calendar day, then clears filters", async () =>
+            {
+                await using (var db = factory.CreateDbContext())
+                {
+                    foreach (var (name, venue, start) in new[]
+                    {
+                        ("Rock Search A", "Nhà hát A", new DateTime(2030, 12, 20, 23, 0, 0)),
+                        ("Rock Search B", "Sân B", new DateTime(2030, 12, 21, 0, 0, 0)),
+                        ("Acoustic Search", "Nhà hát A", new DateTime(2030, 12, 20, 10, 0, 0))
+                    }) db.Concerts.Add(new Concert { Name = name, Venue = venue, StartTime = start, EndTime = start.AddHours(1), Artist = "Test", Address = "Test" });
+                    await db.SaveChangesAsync();
+                }
+                var navigation = new TestNavigation();
+                var window = new MainWindow(factory, session, navigation, navigation);
+                try
+                {
+                    window.Show();
+                    var search = Control<Button>(window, "SearchButton");
+                    var grid = Control<DataGrid>(window, "ConcertDataGrid");
+                    await Until(() => search.IsEnabled && grid.ItemsSource != null);
+                    Assert(grid.Items.Count == 4, "unfiltered concerts loaded");
+                    var name = Control<TextBox>(window, "SearchTextBox");
+                    var venue = Control<ComboBox>(window, "VenueComboBox");
+                    var day = Control<DatePicker>(window, "ConcertDatePicker");
+                    async Task Search() { search.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Until(() => search.IsEnabled); }
+                    name.Text = "  Rock  ";
+                    await Search();
+                    Assert(grid.Items.Count == 2, "trimmed keyword");
+                    venue.SelectedItem = "Nhà hát A";
+                    day.SelectedDate = new DateTime(2030, 12, 20);
+                    await Search();
+                    Assert(grid.Items.Count == 1 && ((Concert)grid.Items[0]).Name == "Rock Search A", "all filters AND together; evening concert included");
+                    Render(window, "concert-search.png");
+                    name.Text = "unmatched concert";
+                    await Search();
+                    Assert(grid.Items.Count == 0 && Control<TextBlock>(window, "ConcertStatusTextBlock").Text.Contains("Không tìm thấy"), "empty result guidance");
+                    name.Clear(); venue.SelectedIndex = 0; day.SelectedDate = null;
+                    await Search();
+                    Assert(grid.Items.Count == 4, "clearing filters restores list");
+                }
+                finally { window.Close(); }
+            });
 
             var first = await NewOrder();
             string? firstLink = null;
@@ -308,6 +482,35 @@ internal static class Program
                 }
                 finally { window.Close(); }
             });
+
+            await Test("ticket window retries issuance before adding Calendar", async () =>
+            {
+                var order = await NewOrder(tickets: 0);
+                int attempts = 0;
+                var tickets = new TestTicketService(async id =>
+                {
+                    if (++attempts == 1) throw new InvalidOperationException("Cloudinary unavailable");
+                    await using var db = factory.CreateDbContext();
+                    var saved = await db.Orders.Include(o => o.Zone).Include(o => o.Tickets).SingleAsync(o => o.Id == id);
+                    saved.Tickets.Add(NewTicket()); saved.Tickets.Add(NewTicket());
+                    await db.SaveChangesAsync();
+                    return saved.Tickets.ToList();
+                });
+                var calls = google.Requests;
+                var window = new TicketWindow(tickets, service, factory, session, order.Id);
+                try
+                {
+                    window.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
+                    var retry = Control<Button>(window, "RetryTicketsButton");
+                    await Until(() => retry.IsEnabled);
+                    Assert(retry.Visibility == Visibility.Visible && google.Requests == calls, "issuance failure has retry without Calendar call");
+                    retry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    await Until(() => Control<Button>(window, "OpenCalendarButton").IsEnabled);
+                    Assert(attempts == 2 && Control<ListBox>(window, "TicketListBox").Items.Count == 2, "retry displays issued tickets");
+                    Render(window, "ticket-qr.png");
+                }
+                finally { window.Close(); }
+            });
         }
         finally
         {
@@ -321,7 +524,11 @@ internal static class Program
     private static Ticket NewTicket()
     {
         var code = "CAL-" + Guid.NewGuid().ToString("N")[..20];
-        return new Ticket { TicketCode = code, Gate = "Gate A", Status = "Valid", QrImageUrl = $"https://res.cloudinary.com/calendar-test/image/upload/{code}.png" };
+        using var data = QRCodeGenerator.GenerateQrCode(code, QRCodeGenerator.ECCLevel.Q);
+        using var qr = new PngByteQRCode(data);
+        string path = System.IO.Path.Combine(AppContext.BaseDirectory, code + ".png");
+        System.IO.File.WriteAllBytes(path, qr.GetGraphic(8));
+        return new Ticket { TicketCode = code, Gate = "Gate A", Status = "Valid", QrImageUrl = new Uri(path).AbsoluteUri };
     }
 
     private static void Assert(bool condition, string message)
@@ -354,15 +561,26 @@ internal static class Program
     private static void Render(Window window, string filename)
     {
         var root = (FrameworkElement)window.Content;
-        root.Measure(new Size(688, 488));
-        root.Arrange(new Rect(0, 0, 688, 488));
+        int width = 688, height = 488;
+        if (!window.IsLoaded)
+        {
+            root.Measure(new Size(width, height));
+            root.Arrange(new Rect(0, 0, width, height));
+        }
         root.UpdateLayout();
-        var bitmap = new RenderTargetBitmap(688, 488, 96, 96, PixelFormats.Pbgra32);
+        if (window.IsLoaded)
+        {
+            width = (int)Math.Ceiling(root.ActualWidth);
+            height = (int)Math.Ceiling(root.ActualHeight);
+        }
+        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
         var background = new DrawingVisual();
         using (var drawing = background.RenderOpen())
-            drawing.DrawRectangle(SystemColors.WindowBrush, null, new Rect(0, 0, 688, 488));
+        {
+            drawing.DrawRectangle(SystemColors.WindowBrush, null, new Rect(0, 0, width, height));
+            drawing.DrawRectangle(new VisualBrush(root), null, new Rect(0, 0, width, height));
+        }
         bitmap.Render(background);
-        bitmap.Render(root);
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var file = System.IO.File.Create(System.IO.Path.Combine(AppContext.BaseDirectory, filename));
@@ -459,4 +677,66 @@ internal sealed class TestTicketService(Func<int, Task<List<Ticket>>>? issue = n
     public Task<List<Ticket>> IssueTicketsAsync(int orderId) => issue?.Invoke(orderId)
         ?? throw new InvalidOperationException("Existing tickets must not be issued twice.");
     public string GenerateTicketCode(DateTime concertDate) => throw new NotSupportedException();
+}
+
+internal sealed class TestHttpClientFactory(HttpMessageHandler handler) : System.Net.Http.IHttpClientFactory
+{
+    public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
+}
+
+internal sealed class OfflineCloudinary : HttpMessageHandler
+{
+    private int _requests;
+    public int Requests => _requests;
+    public int FailOnRequest { get; set; }
+    public bool InvalidUrlOnce { get; set; }
+    public Action? AfterUpload { get; set; }
+    public ConcurrentDictionary<string, byte[]> Uploads { get; } = new();
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        int number = Interlocked.Increment(ref _requests);
+        if (request.RequestUri?.Host != "api.cloudinary.com" || request.Method != HttpMethod.Post)
+            throw new InvalidOperationException("Unexpected Cloudinary request");
+        if (number == FailOnRequest)
+            return new HttpResponseMessage(HttpStatusCode.BadRequest)
+            { Content = new StringContent("{\"error\":{\"message\":\"Simulated upload failure\"}}", Encoding.UTF8, "application/json") };
+        var fields = new Dictionary<string, string>();
+        byte[]? png = null;
+        foreach (var part in (MultipartContent)request.Content!)
+        {
+            string name = part.Headers.ContentDisposition!.Name!.Trim('"');
+            if (name == "file") png = await part.ReadAsByteArrayAsync(cancellationToken);
+            else fields[name] = await part.ReadAsStringAsync(cancellationToken);
+        }
+        if (png == null || !png.AsSpan().StartsWith(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 })
+            || fields["overwrite"] != "false")
+            throw new InvalidOperationException("Expected idempotent PNG upload");
+        string code = fields["public_id"];
+        Uploads.TryAdd(code, png);
+        string url = "https://res.cloudinary.com/ticket-tests/image/upload/v1/" + fields["folder"] + "/" + code + ".png";
+        if (InvalidUrlOnce) { InvalidUrlOnce = false; url = "file:///C:/unsafe.png"; }
+        var after = AfterUpload;
+        AfterUpload = null;
+        after?.Invoke();
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(new JsonObject
+            {
+                ["secure_url"] = url, ["public_id"] = fields["folder"] + "/" + code,
+                ["resource_type"] = "image", ["format"] = "png"
+            }.ToJsonString(), Encoding.UTF8, "application/json")
+        };
+    }
+}
+
+internal sealed class TestNavigation : INavigationService, IAuthService
+{
+    public void ShowLogin() => throw new NotSupportedException();
+    public void ShowMain() => throw new NotSupportedException();
+    public void ShowConcertDetail(int concertId) => throw new NotSupportedException();
+    public bool ShowPayment(int orderId) => throw new NotSupportedException();
+    public void ShowTicket(int orderId) => throw new NotSupportedException();
+    public Task<User?> LoginWithGoogleAsync() => throw new NotSupportedException();
+    public Task LogoutAsync() => throw new NotSupportedException();
 }

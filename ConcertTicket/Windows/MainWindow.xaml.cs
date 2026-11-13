@@ -17,6 +17,7 @@ public partial class MainWindow : Window
     private readonly IAuthService _auth;
     private readonly INavigationService _nav;
     private bool _loadingPaymentHistory;
+    private bool _loadingConcerts;
 
     public MainWindow(IDbContextFactory<ConcertDbContext> dbFactory, IUserSession session,
                       IAuthService auth, INavigationService nav)
@@ -28,30 +29,63 @@ public partial class MainWindow : Window
         _nav = nav;
 
         WelcomeTextBlock.Text = "Xin chào, " + _session.CurrentUser?.FullName;
-        LoadConcerts();
+        Loaded += async (_, _) => await LoadConcertsAsync();
     }
 
-    private void LoadConcerts()
+    private async Task LoadConcertsAsync()
     {
-        //mỗi lần cần thì tạo context mới, dùng xong tự đóng => dữ liệu luôn mới
-        using var ctx = _dbFactory.CreateDbContext();
-
-        //TODO (Bảo): ghép thêm điều kiện tìm kiếm bằng AsQueryable() + Where
-        ConcertDataGrid.ItemsSource = ctx.Concerts.OrderBy(c => c.StartTime).ToList();
+        if (_loadingConcerts) return;
+        _loadingConcerts = true;
+        SearchButton.IsEnabled = DetailButton.IsEnabled = ConcertDataGrid.IsEnabled = false;
+        ConcertStatusTextBlock.Text = "Đang tìm concert...";
+        try
+        {
+            await using var ctx = await _dbFactory.CreateDbContextAsync();
+            if (VenueComboBox.ItemsSource == null)
+            {
+                var venues = await ctx.Concerts.AsNoTracking().Select(c => c.Venue).Distinct().OrderBy(v => v).ToListAsync();
+                VenueComboBox.ItemsSource = new[] { "Tất cả địa điểm" }.Concat(venues).ToList();
+                VenueComboBox.SelectedIndex = 0;
+            }
+            var query = ctx.Concerts.AsNoTracking().AsQueryable();
+            string keyword = SearchTextBox.Text.Trim();
+            if (keyword.Length > 0) query = query.Where(c => c.Name.Contains(keyword));
+            if (VenueComboBox.SelectedIndex > 0 && VenueComboBox.SelectedItem is string venue)
+                query = query.Where(c => c.Venue == venue);
+            if (ConcertDatePicker.SelectedDate is DateTime date)
+                query = query.Where(c => c.StartTime.Date == date.Date);
+            var concerts = await query.OrderBy(c => c.StartTime).ToListAsync();
+            ConcertDataGrid.ItemsSource = concerts;
+            ConcertStatusTextBlock.Text = concerts.Count == 0 ? "Không tìm thấy concert phù hợp." : $"{concerts.Count} concert";
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceError("Concert search failed: {0}", ex.GetType().Name);
+            ConcertDataGrid.ItemsSource = null;
+            ConcertStatusTextBlock.Text = "Không tải được concert. Kiểm tra database rồi bấm Tìm lại.";
+        }
+        finally
+        {
+            _loadingConcerts = false;
+            SearchButton.IsEnabled = DetailButton.IsEnabled = ConcertDataGrid.IsEnabled = true;
+        }
     }
 
-    private void DetailButton_Click(object sender, RoutedEventArgs e)
+    private async void SearchButton_Click(object sender, RoutedEventArgs e) => await LoadConcertsAsync();
+
+    private async void DetailButton_Click(object sender, RoutedEventArgs e)
     {
-        OpenSelectedConcert();
+        await OpenSelectedConcertAsync();
     }
 
-    private void ConcertDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    private async void ConcertDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        OpenSelectedConcert();
+        await OpenSelectedConcertAsync();
     }
 
-    private void OpenSelectedConcert()
+    private async Task OpenSelectedConcertAsync()
     {
+        if (_loadingConcerts) return;
         Concert? concert = ConcertDataGrid.SelectedItem as Concert;
         if (concert == null)
         {
@@ -60,7 +94,7 @@ public partial class MainWindow : Window
         }
 
         _nav.ShowConcertDetail(concert.Id);   //mở Window của Dương
-        LoadConcerts();                       //quay lại thì tải lại
+        await LoadConcertsAsync();            //quay lại thì tải lại, giữ bộ lọc
     }
 
     private async void LogoutButton_Click(object sender, RoutedEventArgs e)
