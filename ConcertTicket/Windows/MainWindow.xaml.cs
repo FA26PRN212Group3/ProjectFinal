@@ -104,6 +104,12 @@ public partial class MainWindow : Window
         Close();
     }
 
+    //Huy: mở cửa sổ soát vé (check-in)
+    private void CheckInButton_Click(object sender, RoutedEventArgs e)
+    {
+        _nav.ShowCheckIn();
+    }
+
     private async void PaymentHistoryButton_Click(object sender, RoutedEventArgs e)
     {
         if (_loadingPaymentHistory || _session.CurrentUser is not { Id: > 0 } user) return;

@@ -34,6 +34,13 @@ Hoặc chạy từ thư mục solution: `dotnet run --project ConcertTicket`.
 - Mã vé được lưu trước khi upload. Nếu upload hoặc lưu link lỗi, bấm **Thử lại vé**: giữ nguyên mã, chỉ bổ sung vé/QR còn thiếu. Gọi đồng thời không phát hành vượt số lượng; ảnh dùng PublicId cố định theo mã vé và không ghi đè.
 - Xem lại đơn đã trả tiền qua **Lịch sử thanh toán** để mở lại vé. Không cần thanh toán lại khi QR hoặc Calendar gặp lỗi.
 
+## Soát vé / Check-in
+
+- Ở màn hình chính bấm **Soát vé**. Quét QR bằng máy quét USB (máy quét tự gõ mã + Enter), gõ mã vé tay, hoặc bấm **Chọn ảnh QR** để đọc QR từ file ảnh (ZXing.Net).
+- Kết quả: **xanh** = check-in thành công (vé `Valid` → `Used`), **vàng** = vé đã check-in rồi, **đỏ** = mã không có trong DB. Xanh/vàng hiện kèm mã vé, tên concert, khu và cổng.
+- Đổi trạng thái bằng 1 câu `UPDATE ... WHERE Status = 'Valid'`, nên 2 máy quét cùng 1 vé thì chỉ 1 máy báo thành công.
+- Code: `TicketService.CheckInAsync`, `TicketService.ReadQrCode`, `Windows/CheckInWindow`.
+
 ## Google Calendar (F6): setup và sử dụng
 
 1. Trong [Google Cloud Console](https://console.cloud.google.com/), chọn cùng project đang dùng cho đăng nhập Google. Vào **APIs & Services → Library**, tìm **Google Calendar API**, bấm **Enable**.

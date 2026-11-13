@@ -2,6 +2,8 @@ using System.Globalization;
 using System.IO;
 using System.Net.Http;
 using System.Security.Cryptography;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using CloudinaryDotNet;
 using CloudinaryDotNet.Actions;
 using ConcertTicket.Models;
@@ -11,6 +13,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using QRCoder;
+using ZXing;
 
 namespace ConcertTicket.Services;
 
@@ -117,5 +120,50 @@ public class TicketService : ITicketService
             if (!ctx.Tickets.Any(t => t.TicketCode == code)) return code;
         }
         throw new InvalidOperationException("Chưa tạo được mã vé duy nhất. Vui lòng thử lại.");
+    }
+
+    //Người viết: Huy (check-in)
+    public async Task<CheckInResult> CheckInAsync(string ticketCode)
+    {
+        string code = (ticketCode ?? "").Trim().ToUpperInvariant();
+        var result = new CheckInResult { Result = "Invalid" };
+        if (code.Length == 0 || code.Length > 50) return result;
+
+        await using var ctx = await _dbFactory.CreateDbContextAsync();
+
+        //UPDATE có điều kiện Status = 'Valid': 2 máy quét cùng lúc thì chỉ 1 máy đổi được (trả về 1 dòng)
+        int changed = await ctx.Tickets
+            .Where(t => t.TicketCode == code && t.Status == "Valid")
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.Status, "Used"));
+
+        result.Ticket = await ctx.Tickets.AsNoTracking()
+            .Include(t => t.Order).ThenInclude(o => o.Zone).ThenInclude(z => z.Concert)
+            .FirstOrDefaultAsync(t => t.TicketCode == code);
+
+        if (changed == 1) result.Result = "OK";
+        else if (result.Ticket != null) result.Result = "Used";
+        _logger.LogInformation("Check-in {Code}: {Result}", code, result.Result);
+        return result;
+    }
+
+    public string? ReadQrCode(string imagePath)
+    {
+        //đọc ảnh bằng WPF rồi đổi sang mảng pixel BGRA cho ZXing
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;   //đọc xong thả file ra
+        image.UriSource = new Uri(Path.GetFullPath(imagePath));
+        image.EndInit();
+
+        var bgra = new FormatConvertedBitmap(image, PixelFormats.Bgra32, null, 0);
+        int stride = bgra.PixelWidth * 4;
+        byte[] pixels = new byte[stride * bgra.PixelHeight];
+        bgra.CopyPixels(pixels, stride, 0);
+
+        var reader = new BarcodeReaderGeneric();
+        reader.Options.PossibleFormats = new List<BarcodeFormat> { BarcodeFormat.QR_CODE };
+        reader.Options.TryHarder = true;
+        var found = reader.Decode(new RGBLuminanceSource(pixels, bgra.PixelWidth, bgra.PixelHeight, RGBLuminanceSource.BitmapFormat.BGRA32));
+        return found?.Text;
     }
 }

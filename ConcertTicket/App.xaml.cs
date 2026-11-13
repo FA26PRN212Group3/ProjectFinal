@@ -69,6 +69,7 @@ public partial class App : Application
         //ConcertDetailWindow, PaymentWindow, TicketWindow cần tham số => NavigationService tạo bằng ActivatorUtilities
         builder.Services.AddTransient<LoginWindow>();
         builder.Services.AddTransient<MainWindow>();
+        builder.Services.AddTransient<CheckInWindow>();
 
         _host = builder.Build();
     }

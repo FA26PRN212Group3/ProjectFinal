@@ -62,6 +62,13 @@ public class NavigationService : INavigationService
         win.ShowDialog();
     }
 
+    public void ShowCheckIn()
+    {
+        var win = _provider.GetRequiredService<CheckInWindow>();
+        win.Owner = GetActiveWindow();
+        win.ShowDialog();
+    }
+
     //cửa sổ đang mở phía trước, để cửa sổ mới hiện giữa nó
     private static Window? GetActiveWindow()
     {

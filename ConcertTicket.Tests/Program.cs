@@ -241,6 +241,81 @@ internal static class Program
                 Assert((await tickets.IssueTicketsAsync(order.Id)).All(t => t.QrImageUrl!.StartsWith("https://res.cloudinary.com/")), "retry repairs images");
             });
 
+            //===== Check-in (Huy) =====
+            async Task<string> NewCheckInCode()
+            {
+                var order = await NewOrder(tickets: 0);
+                return (await TicketService(new OfflineCloudinary()).IssueTicketsAsync(order.Id))[0].TicketCode;
+            }
+
+            await Test("check-in: first scan OK, second scan Used, unknown code Invalid", async () =>
+            {
+                var tickets = TicketService(new OfflineCloudinary());
+                string code = await NewCheckInCode();
+                var first = await tickets.CheckInAsync("  " + code.ToLowerInvariant() + " ");
+                Assert(first.Result == "OK" && first.Ticket!.Status == "Used" && first.Ticket.Order.Zone.Concert.Name == "Đêm nhạc Calendar", "first scan admits with ticket details");
+                var second = await tickets.CheckInAsync(code);
+                Assert(second.Result == "Used" && second.Ticket!.TicketCode == code, "second scan reports already checked in");
+                foreach (var bad in new[] { "CON-20301220-ZZZZZZ", "", "   ", "https://evil.example/qr", new string('A', 60) })
+                {
+                    var invalid = await tickets.CheckInAsync(bad);
+                    Assert(invalid.Result == "Invalid" && invalid.Ticket == null, "unknown code is invalid: " + bad);
+                }
+            });
+
+            await Test("check-in: concurrent scans of one ticket admit exactly once", async () =>
+            {
+                string code = await NewCheckInCode();
+                var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => TicketService(new OfflineCloudinary()).CheckInAsync(code)));
+                Assert(results.Count(r => r.Result == "OK") == 1 && results.Count(r => r.Result == "Used") == 5, "only one gate admits the ticket");
+            });
+
+            await Test("check-in: QR image is decoded back to the ticket code", async () =>
+            {
+                var tickets = TicketService(new OfflineCloudinary());
+                string code = await NewCheckInCode();
+                string qrPath = System.IO.Path.Combine(AppContext.BaseDirectory, "checkin-" + code + ".png");
+                using (var data = QRCodeGenerator.GenerateQrCode(code, QRCodeGenerator.ECCLevel.Q))
+                using (var qr = new PngByteQRCode(data))
+                    System.IO.File.WriteAllBytes(qrPath, qr.GetGraphic(8));
+                Assert(tickets.ReadQrCode(qrPath) == code, "QR decoded to TicketCode");
+
+                string blankPath = System.IO.Path.Combine(AppContext.BaseDirectory, "checkin-blank.png");
+                var blank = new RenderTargetBitmap(200, 200, 96, 96, PixelFormats.Pbgra32);
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(blank));
+                using (var file = System.IO.File.Create(blankPath)) encoder.Save(file);
+                Assert(tickets.ReadQrCode(blankPath) == null, "image without QR returns null");
+            });
+
+            await Test("check-in window shows green, yellow and red results", async () =>
+            {
+                string code = await NewCheckInCode();
+                var window = new CheckInWindow(TicketService(new OfflineCloudinary()));
+                try
+                {
+                    var box = Control<TextBox>(window, "CodeTextBox");
+                    var button = Control<Button>(window, "CheckButton");
+                    var result = Control<TextBlock>(window, "ResultTextBlock");
+                    async Task Scan(string text)
+                    {
+                        box.Text = text;
+                        button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                        await Until(() => button.IsEnabled && box.Text == "");
+                    }
+                    await Scan(code);
+                    Assert(result.Text.Contains("THÀNH CÔNG") && Control<TextBlock>(window, "DetailTextBlock").Text.Contains("Gate A"), "green result with gate");
+                    Render(window, "checkin-ok.png");
+                    await Scan(code);
+                    Assert(result.Text.Contains("ĐÃ CHECK-IN"), "yellow result on rescan");
+                    Render(window, "checkin-used.png");
+                    await Scan("CON-00000000-XXXXXX");
+                    Assert(result.Text.Contains("KHÔNG HỢP LỆ"), "red result for unknown code");
+                    Render(window, "checkin-invalid.png");
+                }
+                finally { window.Close(); }
+            });
+
             await Test("concert search combines trimmed name, venue and calendar day, then clears filters", async () =>
             {
                 await using (var db = factory.CreateDbContext())
@@ -677,6 +752,8 @@ internal sealed class TestTicketService(Func<int, Task<List<Ticket>>>? issue = n
     public Task<List<Ticket>> IssueTicketsAsync(int orderId) => issue?.Invoke(orderId)
         ?? throw new InvalidOperationException("Existing tickets must not be issued twice.");
     public string GenerateTicketCode(DateTime concertDate) => throw new NotSupportedException();
+    public Task<CheckInResult> CheckInAsync(string ticketCode) => throw new NotSupportedException();
+    public string? ReadQrCode(string imagePath) => throw new NotSupportedException();
 }
 
 internal sealed class TestHttpClientFactory(HttpMessageHandler handler) : System.Net.Http.IHttpClientFactory
@@ -737,6 +814,7 @@ internal sealed class TestNavigation : INavigationService, IAuthService
     public void ShowConcertDetail(int concertId) => throw new NotSupportedException();
     public bool ShowPayment(int orderId) => throw new NotSupportedException();
     public void ShowTicket(int orderId) => throw new NotSupportedException();
+    public void ShowCheckIn() => throw new NotSupportedException();
     public Task<User?> LoginWithGoogleAsync() => throw new NotSupportedException();
     public Task LogoutAsync() => throw new NotSupportedException();
 }
