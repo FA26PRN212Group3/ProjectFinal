@@ -13,4 +13,6 @@ public interface INavigationService
     bool ShowPayment(int orderId);   //true = Order + Payment đã xác nhận trong DB, không dựa riêng ReturnUrl
 
     void ShowTicket(int orderId);
+
+    void ShowCheckIn();
 }

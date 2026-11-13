@@ -15,6 +15,8 @@
         <DockPanel Grid.Row="0">
             <Button x:Name="PaymentHistoryButton" DockPanel.Dock="Right" Content="Lịch sử thanh toán" Height="32"
                     Padding="12,0" Margin="8,0,0,0" Click="PaymentHistoryButton_Click"/>
+            <Button x:Name="CheckInButton" DockPanel.Dock="Right" Content="Soát vé" Width="100" Height="32"
+                    Margin="8,0,0,0" Click="CheckInButton_Click"/>
             <Button x:Name="LogoutButton" DockPanel.Dock="Right" Content="Đăng xuất" Width="100" Height="32"
                     Click="LogoutButton_Click"/>
             <TextBlock x:Name="WelcomeTextBlock" FontSize="18" FontWeight="Bold" VerticalAlignment="Center"/>
