@@ -9,12 +9,14 @@ namespace ConcertTicket.Windows;
 public partial class CheckInWindow : Window
 {
     private readonly ITicketService _ticketService;
+    private readonly ICalendarService? _calendar;
     private bool _checking;
 
-    public CheckInWindow(ITicketService ticketService)
+    public CheckInWindow(ITicketService ticketService, ICalendarService? calendar = null)
     {
         InitializeComponent();
         _ticketService = ticketService;
+        _calendar = calendar;
         Loaded += (_, _) => CodeTextBox.Focus();
     }
 
@@ -77,7 +79,20 @@ public partial class CheckInWindow : Window
             }
 
             if (result.Result == "OK")
+            {
                 ShowResult("#D4EDDA", "✔ CHECK-IN THÀNH CÔNG", detail);
+                if (result.Ticket != null && _calendar != null)
+                {
+                    try
+                    {
+                        await _calendar.RemoveOrderEventAsync(result.Ticket.OrderId);
+                    }
+                    catch (Exception ex)
+                    {
+                        DetailTextBlock.Text += "\n(Chưa xóa được lịch Google: " + ex.Message + ")";
+                    }
+                }
+            }
             else if (result.Result == "Used")
                 ShowResult("#FFF3CD", "⚠ VÉ ĐÃ CHECK-IN RỒI", detail);
             else
