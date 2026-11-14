@@ -105,6 +105,35 @@ public class GoogleCalendarService : ICalendarService
         return order.GoogleEventLink;
     }
 
+    public async Task RemoveOrderEventAsync(int orderId)
+    {
+        var user = _session.CurrentUser;
+        var credential = _session.GoogleCredential;
+        if (user == null || credential == null) return;
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var ctx = await _dbFactory.CreateDbContextAsync(timeout.Token);
+        var order = await ctx.Orders.AsNoTracking().Include(o => o.Tickets)
+            .SingleOrDefaultAsync(o => o.Id == orderId && o.UserId == user.Id, timeout.Token);
+        if (order == null || string.IsNullOrWhiteSpace(order.GoogleEventId)
+            || order.Tickets.Count == 0 || order.Tickets.Any(t => t.Status != "Used")) return;
+
+        using var calendar = new CalendarService(new BaseClientService.Initializer
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "ConcertTicket"
+        });
+        try
+        {
+            await calendar.Events.Delete("primary", order.GoogleEventId).ExecuteAsync(timeout.Token);
+        }
+        catch (GoogleApiException ex) when (ex.HttpStatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
+        {
+            //sự kiện đã được xóa trước đó, không cần xóa lại
+        }
+        _logger.LogInformation("Đã xóa hoặc xác nhận không còn sự kiện Google Calendar cho đơn {OrderId}", order.Id);
+    }
+
     private static string RequireCalendarLink(string? link)
     {
         if (!Uri.TryCreate(link, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps ||

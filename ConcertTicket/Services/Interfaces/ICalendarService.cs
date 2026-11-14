@@ -9,4 +9,7 @@ public interface ICalendarService
     //lưu GoogleEventId + GoogleEventLink vào Order; đơn đã có sự kiện thì không tạo lại
     //trả về GoogleEventLink để TicketWindow mở
     Task<string> AddOrderEventAsync(int orderId);
+
+    //xóa sự kiện khi tất cả vé đã check-in, giữ ID/link để không tạo lại lịch
+    Task RemoveOrderEventAsync(int orderId);
 }
