@@ -496,7 +496,7 @@ public partial class VnPayService : IPaymentService
     private static bool IsValidOrder(Order order)
     {
         bool isSaved = order.Id > 0 && order.CreatedAt != default;
-        bool hasValidQuantity = order.Quantity >= 1 && order.Quantity <= 4;
+        bool hasValidQuantity = order.Quantity >= 1;
         bool hasValidPrice = order.UnitPrice > 0 && order.UnitPrice <= 9_999_999_999m
             && decimal.Truncate(order.UnitPrice) == order.UnitPrice;
         if (!isSaved || !hasValidQuantity || !hasValidPrice) return false;

@@ -53,7 +53,7 @@ public class TicketService : ITicketService
                 ?? throw new InvalidOperationException("Không tìm thấy đơn hàng của bạn.");
             if (order.Status != "Paid")
                 throw new InvalidOperationException("Chỉ phát hành vé cho đơn đã thanh toán.");
-            if (order.Quantity is < 1 or > 4 || order.Tickets.Count > order.Quantity || string.IsNullOrWhiteSpace(order.Zone.Gate))
+            if (order.Quantity < 1 || order.Tickets.Count > order.Quantity || string.IsNullOrWhiteSpace(order.Zone.Gate))
                 throw new InvalidOperationException("Số lượng vé hoặc cổng vào của đơn không hợp lệ.");
 
             while (order.Tickets.Count < order.Quantity)

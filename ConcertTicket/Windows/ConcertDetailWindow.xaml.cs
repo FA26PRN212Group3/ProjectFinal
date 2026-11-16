@@ -107,20 +107,20 @@ public partial class ConcertDetailWindow : Window
         if (!_hasConcert || zone == null || zone.ConcertId != _concertId)
             error = "Hãy chọn một khu vé của concert.";
         else if (!int.TryParse(QuantityTextBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out quantity)
-                 || quantity < 1 || quantity > 4)
-            error = "Số lượng vé phải là số nguyên từ 1 đến 4.";
+                 || quantity < 1)
+            error = "Số lượng vé phải là số nguyên dương hợp lệ.";
         else if (quantity > zone.Remaining)
             error = "Khu đã chọn không còn đủ vé.";
         else if (!IsValidTotal(zone.Price, quantity))
-            error = "Giá vé không hợp lệ.";
+            error = "Giá vé không hợp lệ hoặc tổng tiền vượt giới hạn thanh toán.";
         else if (_session.CurrentUser == null || _session.CurrentUser.Id <= 0)
             error = "Vui lòng đăng nhập trước khi đặt vé.";
         return error.Length == 0;
     }
 
     private static bool IsValidTotal(decimal price, int quantity) =>
-        price > 0 && decimal.Truncate(price) == price
-        && price <= 999_999_999_999_999_999m / quantity;
+        quantity > 0 && price > 0 && decimal.Truncate(price) == price
+        && price <= 9_999_999_999m / quantity;
 
     private void UpdateTotal(bool showValidation = false)
     {
