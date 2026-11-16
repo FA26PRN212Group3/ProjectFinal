@@ -35,9 +35,12 @@
         </DockPanel>
 
         <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <TextBlock Text="Số lượng (1-4):" VerticalAlignment="Center" Margin="0,0,8,0"/>
-            <TextBox x:Name="QuantityTextBox" Width="60" Height="30" Text="1" VerticalContentAlignment="Center"
+            <TextBlock Text="Số lượng:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <TextBox x:Name="QuantityTextBox" Width="80" Height="30" Text="1" VerticalContentAlignment="Center"
+                     HorizontalContentAlignment="Right" InputScope="Number" AutomationProperties.Name="Số lượng vé"
+                     ToolTip="Nhập số vé cần mua, không vượt số vé còn lại."
                      TextChanged="QuantityTextBox_TextChanged"/>
+            <TextBlock Text="vé" VerticalAlignment="Center" Margin="8,0,0,0"/>
             <TextBlock x:Name="TotalTextBlock" VerticalAlignment="Center" FontWeight="Bold" Margin="16,0,16,0"/>
             <Button x:Name="PayButton" Content="Thanh toán" Width="140" Height="36" Click="PayButton_Click"/>
         </StackPanel>

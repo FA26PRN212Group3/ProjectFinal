@@ -57,7 +57,7 @@ CREATE TABLE Zone (
     CONSTRAINT CK_Zone_Quantity CHECK (TotalQuantity > 0 AND SoldQuantity BETWEEN 0 AND TotalQuantity)
 );
 
--- mỗi đơn mua 1 khu, 1..4 vé
+-- mỗi đơn mua 1 khu, số vé nguyên dương; ứng dụng kiểm tra tồn kho và tổng tiền
 CREATE TABLE [Order] (
     Id              INT IDENTITY(1,1) PRIMARY KEY,
     UserId          INT NOT NULL,
@@ -72,7 +72,7 @@ CREATE TABLE [Order] (
     PaidAt          DATETIME2 NULL,
     CONSTRAINT FK_Order_User FOREIGN KEY (UserId) REFERENCES [User](Id),
     CONSTRAINT FK_Order_Zone FOREIGN KEY (ZoneId) REFERENCES Zone(Id),
-    CONSTRAINT CK_Order_Quantity CHECK (Quantity BETWEEN 1 AND 4),
+    CONSTRAINT CK_Order_Quantity CHECK (Quantity >= 1),
     CONSTRAINT CK_Order_Status CHECK (Status IN ('Pending', 'Paid', 'Failed'))
 );
 
