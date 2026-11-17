@@ -320,10 +320,11 @@ public partial class VnPayService : IPaymentService
         bool isSuccessful = parameters["vnp_ResponseCode"] == "00";
         if (isSuccessful)
         {
-            int updatedZones = await ctx.Database.ExecuteSqlInterpolatedAsync($@"
-                UPDATE dbo.Zone SET SoldQuantity=SoldQuantity+{order.Quantity}
-                WHERE Id={order.ZoneId} AND SoldQuantity<=TotalQuantity-{order.Quantity};",
-                cancellationToken).ConfigureAwait(false);
+            int quantity = order.Quantity;
+            int updatedZones = await ctx.Zones
+                .Where(z => z.Id == order.ZoneId && z.SoldQuantity <= z.TotalQuantity - quantity)
+                .ExecuteUpdateAsync(s => s.SetProperty(z => z.SoldQuantity, z => z.SoldQuantity + quantity),
+                    cancellationToken).ConfigureAwait(false);
 
             if (updatedZones == 1)
             {

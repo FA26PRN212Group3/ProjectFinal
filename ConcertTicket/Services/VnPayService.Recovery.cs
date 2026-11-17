@@ -145,9 +145,11 @@ public partial class VnPayService
         if (_httpClients == null) throw new InvalidOperationException("Chưa đăng ký HttpClient cho VNPAY QueryDR.");
 
         DateTimeOffset now = _time.GetUtcNow();
-        int claimed = await ctx.Database.ExecuteSqlInterpolatedAsync($@"
-            UPDATE dbo.PaymentCheckout SET NextQueryAt={now.AddMinutes(5)}
-            WHERE OrderId={orderId} AND (NextQueryAt IS NULL OR NextQueryAt<={now});", cancellationToken).ConfigureAwait(false);
+        DateTimeOffset nextQueryAt = now.AddMinutes(5);
+        int claimed = await ctx.PaymentCheckouts
+            .Where(c => c.OrderId == orderId && (c.NextQueryAt == null || c.NextQueryAt <= now))
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.NextQueryAt, nextQueryAt), cancellationToken)
+            .ConfigureAwait(false);
         if (claimed != 1)
             return Result(orderId, PaymentState.AwaitingConfirmation, "Đối soát đang chạy hoặc đang trong giới hạn gọi lại 5 phút. Vẫn có thể tải trạng thái từ database.");
 
